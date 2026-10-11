@@ -27,6 +27,24 @@ done_count=0
 if [ -d "$out" ]; then done_count="$(find "$out" -mindepth 2 -maxdepth 2 -name VALIDATION_PASS.txt -type f 2>/dev/null | wc -l)"; fi
 echo FULLY_VALIDATED_SAMPLES="$done_count"/15
 du -sh "$HOME/PROJECTS/zhumiao/.sxy_macaca_lung_work/local_fastqs" 2>/dev/null || true
+echo MOUNT_READ_PROBES
+for spec in "CRR130924/CRR130924_r2.fq.gz" "CRR130928/CRR130928_f1.fq.gz" "CRR130932/CRR130932_f1.fq.gz"; do
+  p="$HOME/PROJECTS/zhumiao/danxibao2/刘光慧食蟹猴肺/$spec"
+  if timeout 45 dd if="$p" of=/dev/null bs=1M count=4 status=none 2>/tmp/probe.err; then
+    echo "PROBE_${spec%%/*}=PASS"
+  else
+    rc=$?
+    echo "PROBE_${spec%%/*}=FAIL_RC_$rc"
+    grep -Eio 'input/output error|permission denied|no such file|transport endpoint[^ ]*|403|404|502|503|504' /tmp/probe.err | sort -u | head -n 5 || true
+  fi
+done
+echo RCLONE_MOUNT_ERRORS
+log="$HOME/.cache/rclone/danxibao2-webdav-mount.log"
+if [ -f "$log" ]; then
+  tail -n 240 "$log"    | sed -E 's#https://[^ /"[:space:]]+#https://[redacted-host]#g; s#[?][^"[:space:]]+#[?][redacted]#g'    | grep -Ei 'ERROR|failed|forbidden|403|timeout|reset|input/output'    | tail -n 80 || true
+fi
+echo PROXY_LISTENER
+ss -ltn 2>/dev/null | grep '127.0.0.1:19324' || true
 journalctl --user -u "$unit" --no-pager --output=cat -n 80 2>/dev/null  | grep -E 'MOUNT_COPY|SOURCE_OK|RUN |SAMPLE_COMPLETE|SAMPLE_FAILED|RESUME_EXISTING|ALL_15|WAIT_REFERENCE'  | tail -n 60 || true
 REMOTE
 unset SSHPASS SXY_PSWD
