@@ -1,0 +1,53 @@
+name: SXY sc sync monitor once
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sxy-sc-monitor-once.yml'
+permissions:
+  contents: read
+jobs:
+  monitor:
+    if: github.repository == 'zhumiao-cloud/ddiittumap'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Snapshot counts and upload progress (no data or secrets)
+        env:
+          SXY_PSWD: ${{ secrets.SXY_PSWD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "${SXY_PSWD:-}"
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -T 15 -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=25 -o ServerAliveInterval=30 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          W=/tmp/sxy_sc_local_split_38026688443_1
+          D="$HOME/PROJECTS/zhumiao/danxibao/输出文件夹/单细胞_严格元数据整合/accelerated_run/expanded_run"
+          echo "TIME_UTC=$(date -u +%FT%TZ)"
+          for sp in human mice; do
+            p="$W/output/expanded_run/seurobj-${sp}/seurobj-${sp}.rds"
+            if test -s "$p"; then stat -c "LOCAL_${sp}_BYTES=%s" "$p"; else echo "LOCAL_${sp}=MISSING"; fi
+            f="$D/seurobj-${sp}/seurobj-${sp}.rds"
+            if timeout 20 stat -L "$f" >/dev/null 2>&1; then stat -c "REMOTE_${sp}_BYTES=%s" "$f"; else echo "REMOTE_${sp}=MISSING"; fi
+          done
+          echo "=== ACTIVE_ANALYSIS ==="
+          ps -eo comm=,stat=,etime=,pcpu=,pmem= | awk '$1=="R"||$1=="python3" {print "PROCESS",$1,$2,$3,$4,$5}' | head -n 12
+          echo '=== SYNC_PROCESSES ==='
+          ps -eo comm=,stat=,etime= | awk '$1=="python3" {print $1,$2,$3}' | head -n 12
+          echo '=== PARTIAL FILE ==='
+          f="$D/seurobj-human/seurobj-human.rds.sxy_partial_verified"
+          if timeout 20 stat -L "$f" >/dev/null 2>&1;then stat -c "PARTIAL_HUMAN_BYTES=%s" "$f";else echo "PARTIAL_HUMAN=NONE";fi
+          echo '=== ROOT ==='
+          if timeout 20 stat "$D" >/dev/null 2>&1;then echo ROOT=OK;else echo ROOT=ERROR;fi
+          echo SNAPSHOT_DONE
+          REMOTE
+          unset SSHPASS SXY_PSWD
