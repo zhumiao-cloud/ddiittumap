@@ -1,0 +1,107 @@
+name: SXY sc final verify and human sync once
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sxy-sc-final-verify-sync-once.yml'
+permissions:
+  contents: read
+concurrency:
+  group: sxy-sc-final-sync-single-writer
+  cancel-in-progress: false
+jobs:
+  verify_and_sync:
+    if: github.repository == 'zhumiao-cloud/ddiittumap' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Verify both local RDS and synchronize missing human outputs
+        shell: bash
+        env:
+          SXY_PSWD: ${{ secrets.SXY_PSWD }}
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "${SXY_PSWD:-}" || exit 10
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ServerAliveCountMax=200 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          WORK=/tmp/sxy_sc_local_split_38026688443_1
+          DEST="$HOME/PROJECTS/zhumiao/danxibao/输出文件夹/单细胞_严格元数据整合/accelerated_run/expanded_run"
+          test -s "$WORK/output/config/sample_metadata_verified_expanded.tsv"
+          for org in human mice; do
+            grep -qx 'STRICT_INTEGRATION_COMPLETE' "$WORK/logs/expanded_$org.log"
+            test -s "$WORK/output/expanded_run/seurobj-$org/seurobj-$org.rds"
+          done
+          test "$(findmnt -n -o FSTYPE -T "$DEST")" = 'fuse.rclone'
+          test -s "$WORK/scripts/sxy_sc_sync_expanded_checked.py"
+          export R_LIBS="$HOME/R/sxy_sc_lib"
+          cat > "$WORK/scripts/sxy_sc_strict_final_verify_20261011.R" <<'R'
+          # 两物种正式文件完整反序列化与元数据审计；所有不一致直接停止。
+          suppressPackageStartupMessages(library(Seurat))
+          work <- "/tmp/sxy_sc_local_split_38026688443_1"
+          tab <- read.delim(file.path(work, "output/config/sample_metadata_verified_expanded.tsv"),
+                            check.names=FALSE)
+          required <- c("sample_uid","dataset","species","batch_id","tissue",
+                        "modality","source_url","source_aggregation")
+          stopifnot(all(required %in% names(tab)), nrow(tab)==184L,
+                    !anyDuplicated(tab$sample_uid))
+          for (org in c("human","mice")) {
+            species <- if (org=="human") "Homo sapiens" else "Mus musculus"
+            f <- file.path(work,"output/expanded_run",paste0("seurobj-",org),
+                           paste0("seurobj-",org,".rds"))
+            obj <- readRDS(f)
+            stopifnot(inherits(obj,"Seurat"), ncol(obj)>=300L,
+                      !anyDuplicated(colnames(obj)),
+                      identical(rownames(obj@meta.data), colnames(obj)),
+                      all(c("RNA","decontX") %in% Assays(obj)),
+                      all(c("pca","harmony","umap") %in% Reductions(obj)),
+                      all(c(required,"decontX_contamination","doublet_status") %in%
+                          names(obj@meta.data)))
+            md <- obj@meta.data
+            stopifnot(all(!is.na(md$species) & md$species==species),
+                      all(is.finite(md$decontX_contamination)),
+                      all(md$decontX_contamination>=0 &
+                          md$decontX_contamination<0.3),
+                      all(as.character(md$doublet_status) %in%
+                          c("Singlet","Previously_screened_by_author")),
+                      all(unique(md$sample_uid) %in% tab$sample_uid))
+            ids <- match(md$sample_uid, tab$sample_uid)
+            stopifnot(!anyNA(ids))
+            for (field in required)
+              stopifnot(all(!is.na(md[[field]]) &
+                            as.character(md[[field]])==as.character(tab[[field]][ids])))
+            q <- file.path(work,"output/expanded_run/QC_by_sample",org,
+                           unique(as.character(md$sample_uid)), "07_seurat_cleaned.rds")
+            stopifnot(all(file.exists(q)),all(file.info(q)$size>0))
+            plots <- file.path(work,"output/expanded_run",paste0("seurobj-",org),
+                 c("01_before_harmony_batches.png","02_after_harmony_batches.png",
+                   "03_clusters.png","04_datasets.png",
+                   "06_batch_mixing_per_cell.csv","07_batch_mixing_summary.csv",
+                   "08_clusters_by_dataset.csv","09_batch_mixing_comparison.png"))
+            stopifnot(all(file.exists(plots)), all(file.info(plots)$size>0))
+            cat("VERIFIED_SPECIES=",org," CELLS=",ncol(obj),
+                " GENES=",nrow(obj)," SAMPLES=",length(unique(md$sample_uid)),
+                " CLUSTERS=",length(unique(as.character(obj$seurat_clusters))),"\n",sep="")
+            rm(obj,md);gc(verbose=FALSE)
+          }
+          cat("BOTH_RDS_STRICT_VERIFICATION_PASS\n")
+          R
+          Rscript "$WORK/scripts/sxy_sc_strict_final_verify_20261011.R"
+          # 完成自查后将人类 R 脚本与原始日志与结果一起同步；
+          # 已存在的目标文件必须散列一致才能跳过，禁止覆盖不明中间文件。
+          mkdir -p "$WORK/output/expanded_run/scripts" "$WORK/output/expanded_run/logs"
+          test -s "$WORK/scripts/integrate_danxibao_species_human.R"
+          cp "$WORK/scripts/integrate_danxibao_species_human.R" "$WORK/output/expanded_run/scripts/integrate_danxibao_species_human.R"
+          cp "$WORK/logs/expanded_human.log" "$WORK/output/expanded_run/logs/expanded_human.log"
+          python3 "$WORK/scripts/sxy_sc_sync_expanded_checked.py" "$WORK" human
+          echo "HUMAN_FULL_OUTPUT_REMOTE_HASH_VERIFIED"
+          REMOTE
+          unset SSHPASS SXY_PSWD
