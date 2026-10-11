@@ -40,6 +40,10 @@ if [ -f "$log" ]; then
 fi
 echo SH02_IPV4
 getent ahostsv4 sh02-httpdown.guangyacdn.com 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, -
+echo PROXY_SERVICE
+systemctl --user show rclone-danxibao2-connect-proxy.service -p ActiveState -p SubState -p Result --no-pager 2>/dev/null || true
+echo SH02_PIN_INSTALLED
+grep -F 'sh02-httpdown.guangyacdn.com:443' "$HOME/.local/libexec/danxibao2_tls_connect_proxy.py" 2>/dev/null || true
 echo PROXY_LISTENER
 ss -ltn 2>/dev/null | grep '127.0.0.1:19324' || true
 journalctl --user -u "$unit" --no-pager --output=cat -n 80 2>/dev/null  | grep -E 'MOUNT_COPY|SOURCE_OK|RUN |SAMPLE_COMPLETE|SAMPLE_FAILED|RESUME_EXISTING|ALL_15|WAIT_REFERENCE'  | tail -n 60 || true
