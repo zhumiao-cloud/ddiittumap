@@ -36,6 +36,8 @@ echo RCLONE_ERROR_HOSTS
 if [ -f "$log" ]; then
   tail -n 400 "$log"    | grep -Ei 'Forbidden|403|ReadFileHandle.Read error|failed'    | grep -Eo 'https://[^/"[:space:]]+'    | sed -E 's#^https://##'    | sort -u || true
 fi
+echo SH02_IPV4
+getent ahostsv4 sh02-httpdown.guangyacdn.com 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, -
 echo PROXY_LISTENER
 ss -ltn 2>/dev/null | grep '127.0.0.1:19324' || true
 journalctl --user -u "$unit" --no-pager --output=cat -n 80 2>/dev/null  | grep -E 'MOUNT_COPY|SOURCE_OK|RUN |SAMPLE_COMPLETE|SAMPLE_FAILED|RESUME_EXISTING|ALL_15|WAIT_REFERENCE'  | tail -n 60 || true
