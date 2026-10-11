@@ -28,8 +28,16 @@ jobs:
           sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
           set -u
           unit=sxy-mmul10-multiome-arc-20261010
+          resume=sxy-multiome-gex-resume-20261011
           echo "NOW=$(date -Is)"
+          echo MAIN_UNIT
           systemctl --user show "$unit" -p ActiveState -p SubState -p Result -p ExecMainStatus --no-pager
+          echo RESUME_UNIT
+          systemctl --user show "$resume" -p ActiveState -p SubState -p Result -p ExecMainStatus --no-pager 2>/dev/null || true
+          echo RESUME_CHUNKS
+          find "$HOME/PROJECTS/zhumiao/multiome_arc_work/P10MK1_1/.resume_chunks" -type f -name 'chunk.*' -printf '%s\n' 2>/dev/null | awk '{n++;s+=$1} END{printf "chunks=%d bytes=%d\n",n+0,s+0}'
+          echo RESUME_JOURNAL
+          journalctl --user -u "$resume" --no-pager --output=cat -n 40 2>/dev/null | tail -n 40 || true
           work="$HOME/PROJECTS/zhumiao/multiome_arc_work"
           for s in P10MK1_1 P10MK2 P20MK3; do
             d="$work/$s"
