@@ -2,7 +2,9 @@ name: SXY macaque status
 on:
   push:
     branches: [main]
-    paths: ['.github/workflows/sxy-macaque-status.yml']
+    paths:
+      - '.github/workflows/sxy-macaque-status.yml'
+      - 'scripts/status_macaque.sh'
 permissions:
   contents: read
 jobs:
