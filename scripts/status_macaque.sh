@@ -29,6 +29,10 @@ done_count=0
 if [ -d "$out" ]; then done_count="$(find "$out" -mindepth 2 -maxdepth 2 -name VALIDATION_PASS.txt -type f 2>/dev/null | wc -l)"; fi
 echo FULLY_VALIDATED_SAMPLES="$done_count"/15
 du -sh "$HOME/PROJECTS/zhumiao/.sxy_macaca_lung_work/local_fastqs" 2>/dev/null || true
+echo LOCAL_FASTQ_ACTIVE_FILES
+find "$HOME/PROJECTS/zhumiao/.sxy_macaca_lung_work/local_fastqs" -maxdepth 2 -type f \( -name '*.part' -o -name '*.fastq.gz' \) -printf '%P\t%s\n' 2>/dev/null | sort | tail -n 40 || true
+echo ACTIVE_CONVERSION_PROCESSES
+ps -u h3039 -o pid,ppid,%cpu,%mem,etime,comm,args --sort=-%cpu 2>/dev/null | grep -E 'sxy_macaca_lung_pipeline|cellranger|martian|(^| )dd( |$)' | grep -v grep | head -n 40 || true
 echo RCLONE_MOUNT_ERRORS
 log="$HOME/.cache/rclone/danxibao2-webdav-mount.log"
 if [ -f "$log" ]; then
