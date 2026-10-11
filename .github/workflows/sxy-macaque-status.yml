@@ -1,0 +1,20 @@
+name: SXY macaque status
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/sxy-macaque-status.yml']
+permissions:
+  contents: read
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Inspect macaque conversion
+        shell: bash
+        run: bash scripts/status_macaque.sh
