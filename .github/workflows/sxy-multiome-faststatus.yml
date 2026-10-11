@@ -38,6 +38,10 @@ jobs:
             if [ -d "$d/input" ]; then
               find "$d/input" -type f -printf '%P|%s\n' 2>/dev/null | sort | tail -n 40
             fi
+            if [ "$s" = P10MK1_1 ] && [ -s "$d/input/GEX/md5.md5" ]; then
+              echo GEX_MD5_MANIFEST
+              cat "$d/input/GEX/md5.md5"
+            fi
             if [ -s "$d/cellranger_arc_console.log" ]; then
               echo LOGTAIL
               tail -n 25 "$d/cellranger_arc_console.log"
