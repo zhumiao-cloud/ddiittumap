@@ -34,6 +34,8 @@ jobs:
           systemctl --user show "$unit" -p ActiveState -p SubState -p Result -p ExecMainStatus --no-pager 2>/dev/null || true
           echo RESUME_UNIT
           systemctl --user show "$resume" -p ActiveState -p SubState -p Result -p ExecMainStatus --no-pager 2>/dev/null || true
+          echo RESUME_JOURNAL
+          journalctl --user -u "$resume" --no-pager --output=cat -n 80 2>/dev/null | tail -n 80 || true
           work="$HOME/PROJECTS/zhumiao/multiome_arc_work"
           ref="$HOME/reference/Mmul_10_Ensembl113_ARC220"
           test -s "$ref/reference.json" && echo REFERENCE_READY=YES || echo REFERENCE_READY=NO
