@@ -39,11 +39,11 @@ jobs:
             echo REFERENCE_READY=YES
             stat -c 'REFERENCE_JSON_SIZE=%s MTIME=%y' "$ref/reference.json"
             python3 - "$ref/reference.json" <<'PY'
-import json,sys
-j=json.load(open(sys.argv[1]))
-for k in ("genomes","organism","assembly","version"):
-    if k in j: print(f"{k}={j[k]}")
-PY
+          import json,sys
+          j=json.load(open(sys.argv[1]))
+          for k in ("genomes","organism","assembly","version"):
+              if k in j: print(f"{k}={j[k]}")
+          PY
           else
             echo REFERENCE_READY=NO
           fi
