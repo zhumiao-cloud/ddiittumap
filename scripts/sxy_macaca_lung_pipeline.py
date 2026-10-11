@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
-import gzip, hashlib, os, shutil, subprocess, time
+import gzip, hashlib, os, shutil, subprocess, time, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 H=Path.home()
@@ -15,6 +15,7 @@ SAMPLES=[("Lung_YM1",924),("Lung_YM2",928),("Lung_YM3",932),("Lung_YM4",936),
 ("Lung_OM2",956),("Lung_OM3",960),("Lung_OM4",964),
 ("Lung_OF1",968),("Lung_OF2",972),("Lung_OF3",976),("Lung_OF4",980)]
 MEX=("matrix.mtx.gz","features.tsv.gz","barcodes.tsv.gz")
+COUNT_SLOTS=threading.Semaphore(3)
 
 def log(*x): print(time.strftime("%F %T"),*x,flush=True)
 def need(x,msg):
@@ -112,8 +113,10 @@ def one(sample,start):
     counts=WORK/"counts"; counts.mkdir(parents=True,exist_ok=True); out=counts/sample/"outs"
     if not (out/"filtered_feature_bc_matrix/matrix.mtx.gz").is_file():
         if (counts/sample).exists(): log("RESUME_EXISTING_CELLRANGER_CHECKPOINT",sample)
-        cmd([CR,"count","--id",sample,"--transcriptome",REF,"--fastqs",fq,"--sample",sample,
-             "--chemistry","auto","--include-introns","true","--create-bam=false","--localcores","24","--localmem","240"],cwd=counts)
+        with COUNT_SLOTS:
+            log("CELLRANGER_SLOT_ACQUIRED",sample)
+            cmd([CR,"count","--id",sample,"--transcriptome",REF,"--fastqs",fq,"--sample",sample,
+                 "--chemistry","auto","--include-introns","true","--create-bam=false","--localcores","24","--localmem","240"],cwd=counts)
     for a,b in (("filtered_feature_bc_matrix","10x"),("raw_feature_bc_matrix","raw_10x")):
         for n in MEX: put(out/a/n,final/b/n)
     v=WORK/"validated"/sample; v.mkdir(parents=True,exist_ok=True)
@@ -128,9 +131,9 @@ def main():
     need(SRC.is_dir() and OUT.parent.is_dir(),"danxibao2 mount unavailable")
     need(CR.is_file() and VAL.is_file(),"required executable/script missing")
     waitref()
-    # 以3路并发处理不同样本，每路24核、240GB，合计72核、720GB。
-    # 只有全部样本通过完整10x和R校验才能报告全部完成。
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    # 6个样本可并行暂存FASTQ；Cell Ranger由COUNT_SLOTS限制为最多3个并发。
+    # 计算峰值仍为72核、720GB，额外worker仅用于I/O，不突破服务器计算资源上限。
+    with ThreadPoolExecutor(max_workers=6) as executor:
         futures={executor.submit(one,s,n):s for s,n in SAMPLES}
         failures=[]
         for future in as_completed(futures):
