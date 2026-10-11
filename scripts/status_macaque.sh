@@ -32,6 +32,10 @@ log="$HOME/.cache/rclone/danxibao2-webdav-mount.log"
 if [ -f "$log" ]; then
   tail -n 240 "$log"    | sed -E 's#https://[^ /"[:space:]]+#https://[redacted-host]#g; s#[?][^"[:space:]]+#[?][redacted]#g'    | grep -Ei 'ERROR|failed|forbidden|403|timeout|reset|input/output'    | tail -n 80 || true
 fi
+echo RCLONE_ERROR_HOSTS
+if [ -f "$log" ]; then
+  tail -n 400 "$log"    | grep -Ei 'Forbidden|403|ReadFileHandle.Read error|failed'    | grep -Eo 'https://[^/"[:space:]]+'    | sed -E 's#^https://##'    | sort -u || true
+fi
 echo PROXY_LISTENER
 ss -ltn 2>/dev/null | grep '127.0.0.1:19324' || true
 journalctl --user -u "$unit" --no-pager --output=cat -n 80 2>/dev/null  | grep -E 'MOUNT_COPY|SOURCE_OK|RUN |SAMPLE_COMPLETE|SAMPLE_FAILED|RESUME_EXISTING|ALL_15|WAIT_REFERENCE'  | tail -n 60 || true
