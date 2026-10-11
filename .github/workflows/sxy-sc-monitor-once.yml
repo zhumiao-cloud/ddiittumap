@@ -62,3 +62,5 @@ jobs:
           echo SNAPSHOT_DONE
           REMOTE
           unset SSHPASS SXY_PSWD
+
+# final one-shot progress check before removal
