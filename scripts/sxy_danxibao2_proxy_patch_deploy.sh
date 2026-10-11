@@ -102,3 +102,26 @@ cmp "$TMP/upload" "$TMP/readback"
 echo "WEBDAV_READBACK_BYTE_COMPARISON=PASS"
 rollback=0
 echo "SCOPED_PROXY_FIX_VERIFIED_AND_RETAINED=PASS"
+
+M3_UNIT="sxy-mmul10-multiome-arc-20261010"
+M3_REF="$HOME/reference/Mmul_10_Ensembl113_ARC220/reference.json"
+M3_OUT="$HOME/PROJECTS/zhumiao/danxibao3/整理转换文件"
+M3_STATE="$(systemctl --user is-active "$M3_UNIT" 2>/dev/null || true)"
+echo "MULTIOME3_SERVICE_BEFORE=$M3_STATE"
+if [ "$M3_STATE" != "active" ]; then
+  systemctl --user reset-failed "$M3_UNIT" 2>/dev/null || true
+  systemctl --user restart "$M3_UNIT"
+  sleep 5
+  echo "MULTIOME3_SERVICE_ACTION=RESTARTED"
+else
+  echo "MULTIOME3_SERVICE_ACTION=UNCHANGED_ACTIVE"
+fi
+systemctl --user show "$M3_UNIT" -p ActiveState -p SubState -p Result -p ExecMainStatus --no-pager
+if [ -s "$M3_REF" ]; then echo "MULTIOME3_REFERENCE=READY"; else echo "MULTIOME3_REFERENCE=NOT_READY"; fi
+for s in P10MK1_1 P10MK2 P20MK3; do
+  if [ -s "$M3_OUT/$s/.fully_verified" ]; then
+    echo "MULTIOME3_$s=VERIFIED"
+  else
+    echo "MULTIOME3_$s=NOT_VERIFIED"
+  fi
+done
