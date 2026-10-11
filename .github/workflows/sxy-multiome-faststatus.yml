@@ -43,6 +43,16 @@ jobs:
               tail -n 25 "$d/cellranger_arc_console.log"
             fi
           done
+          echo REMOTE_GEX_SIZES_WITH_PROXY
+          export HTTPS_PROXY=http://127.0.0.1:19324
+          export https_proxy=http://127.0.0.1:19324
+          timeout 30 rclone lsl 'danxibao3_webdav:P10MK1_1/GEX' 2>/dev/null | grep -E 'P10-zc_S1_L001_R[12]_001.fastq.gz' || true
+          unset HTTPS_PROXY https_proxy
+          echo RCLONE_COPY_PROXY_ENV
+          pid="$(pgrep -f 'rclone copy danxibao3_webdav:P10MK1_1/GEX' | head -n1 || true)"
+          if [ -n "$pid" ] && [ -r "/proc/$pid/environ" ]; then
+            tr '\0' '\n' < "/proc/$pid/environ" | grep -E '^(HTTPS_PROXY|https_proxy)=' || echo PROXY_ENV_MISSING
+          fi
           echo PROCESSES
           ps -u h3039 -o pid,ppid,%cpu,%mem,etime,comm,args --sort=-%cpu 2>/dev/null | grep -E 'arc_multiome|cellranger-arc|martian|STAR|rclone copy danxibao3_webdav:P10MK' | grep -v grep | head -n 50 || true
           df -hT "$HOME" | tail -n 1
