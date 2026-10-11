@@ -47,5 +47,7 @@ grep -F 'sh02-httpdown.guangyacdn.com:443' "$HOME/.local/libexec/danxibao2_tls_c
 echo PROXY_LISTENER
 ss -ltn 2>/dev/null | grep '127.0.0.1:19324' || true
 journalctl --user -u "$unit" --no-pager --output=cat -n 80 2>/dev/null  | grep -E 'MOUNT_COPY|SOURCE_OK|RUN |SAMPLE_COMPLETE|SAMPLE_FAILED|RESUME_EXISTING|ALL_15|WAIT_REFERENCE'  | tail -n 60 || true
+echo JOURNAL_TAIL_SAFE
+journalctl --user -u "$unit" --no-pager --output=cat -n 140 2>/dev/null  | sed -E 's#https://[^ /"[:space:]]+#https://[redacted-host]#g; s#[?][^"[:space:]]+#[?][redacted]#g'  | tail -n 140 || true
 REMOTE
 unset SSHPASS SXY_PSWD
