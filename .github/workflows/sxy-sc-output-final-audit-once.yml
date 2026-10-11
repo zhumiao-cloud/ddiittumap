@@ -1,0 +1,65 @@
+name: SXY sc output final read-only audit once
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/sxy-sc-output-final-audit-once.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.repository == 'zhumiao-cloud/ddiittumap' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - name: Verify final delivered datasets without exposing personal data
+        shell: bash
+        env:
+          SXY_PSWD: ${{ secrets.SXY_PSWD }}
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "${SXY_PSWD:-}"
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ServerAliveCountMax=120 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          WORK=/tmp/sxy_sc_local_split_38026688443_1
+          BASE="$HOME/PROJECTS/zhumiao/danxibao/输出文件夹/单细胞_严格元数据整合"
+          DEST="$BASE/accelerated_run/expanded_run"
+          echo "VERIFY_UTC=$(date -u +%FT%TZ)"
+          test "$(findmnt -n -o FSTYPE -T "$DEST")" = "fuse.rclone"
+          echo "MOUNT_VERIFIED=YES"
+          test -s "$WORK/output/config/sample_metadata_verified_expanded.tsv"
+          printf 'VERIFIED_METADATA_ROWS='
+          awk 'END{print NR-1}' "$WORK/output/config/sample_metadata_verified_expanded.tsv"
+          for sp in human mice; do
+            echo "SPECIES=$sp"
+            grep -qx STRICT_INTEGRATION_COMPLETE "$WORK/logs/expanded_$sp.log"
+            localf="$WORK/output/expanded_run/seurobj-$sp/seurobj-$sp.rds"
+            remotef="$DEST/seurobj-$sp/seurobj-$sp.rds"
+            test -s "$localf" && test -s "$remotef"
+            stat -c 'LOCAL_RDS_BYTES=%s' "$localf"
+            stat -c 'REMOTE_RDS_BYTES=%s' "$remotef"
+            test "$(stat -c %s "$localf")" = "$(stat -c %s "$remotef")"
+            echo "RDS_SIZE_MATCH=YES"
+            for p in "01_before_harmony_batches.png" "02_after_harmony_batches.png" "03_clusters.png" "04_datasets.png" "06_batch_mixing_per_cell.csv" "07_batch_mixing_summary.csv" "08_clusters_by_dataset.csv" "09_batch_mixing_comparison.png"; do
+              test -s "$DEST/seurobj-$sp/$p"
+            done
+            test -s "$DEST/scripts/integrate_danxibao_species_$sp.R"
+            test -s "$DEST/logs/expanded_$sp.log"
+            count=$(find "$DEST/QC_by_sample/$sp" -type f -name '07_seurat_cleaned.rds' | wc -l)
+            echo "DELIVERED_QC_RDS_COUNT=$count"
+            excl=$(find "$DEST/QC_by_sample/$sp" -type f -name 'QC_EXCLUDED.txt' | wc -l)
+            echo "DELIVERED_QC_EXCLUDED_COUNT=$excl"
+            if test "$sp" = human; then test "$count" -eq 88 && test "$excl" -eq 42; else test "$count" -eq 7 && test "$excl" -eq 0; fi
+            echo "SPECIES_OUTPUTS_PRESENT=YES"
+          done
+          echo "FINAL_DELIVERABLE_PATHS_VERIFIED"
+          REMOTE
+          unset SSHPASS SXY_PSWD
