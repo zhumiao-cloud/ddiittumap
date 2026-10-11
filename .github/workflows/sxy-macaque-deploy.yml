@@ -2,7 +2,11 @@ name: SXY macaque deploy
 on:
   push:
     branches: [main]
-    paths: ['.github/workflows/sxy-macaque-deploy.yml']
+    paths:
+      - '.github/workflows/sxy-macaque-deploy.yml'
+      - 'scripts/deploy_macaque.sh'
+      - 'scripts/sxy_macaca_lung_pipeline.py'
+      - 'scripts/sxy_macaca_lung_validate.R'
 permissions:
   contents: read
 jobs:
