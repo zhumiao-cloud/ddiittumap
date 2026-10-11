@@ -7,6 +7,8 @@ echo STATUS_STAGE_INSTALL
 sudo apt-get update -qq
 sudo apt-get install -y -qq sshpass >/dev/null
 install -d -m 700 "$HOME/.ssh"
+echo RUNNER_SH02_IPV4
+getent ahostsv4 sh02-httpdown.guangyacdn.com 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true
 echo STATUS_STAGE_HOSTKEY
 ssh-keyscan -T 15 -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
 chmod 600 "$HOME/.ssh/known_hosts"
