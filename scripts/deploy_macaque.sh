@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 set +x
+trap 'rc=$?; echo DEPLOY_FAILED_LINE=$LINENO RC=$rc; exit $rc' ERR
 
+echo STAGE_INSTALL
 test -n "${SXY_PSWD:-}"
 sudo apt-get update -qq
 sudo apt-get install -y -qq sshpass >/dev/null
+echo STAGE_HOSTKEY
 install -d -m 700 "$HOME/.ssh"
 ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
 chmod 600 "$HOME/.ssh/known_hosts"
 export SSHPASS="$SXY_PSWD"
+echo STAGE_SSH_READY
 
 target=/home/h3039/PROJECTS/zhumiao/.sxy_macaca_lung_work
+echo STAGE_REMOTE_MKDIR
 sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 h3039@sxycloud1.top "mkdir -p '$target'"
+echo STAGE_SCP
 sshpass -e scp -P 20111 -o StrictHostKeyChecking=yes   scripts/sxy_macaca_lung_pipeline.py   scripts/sxy_macaca_lung_validate.R   "h3039@sxycloud1.top:$target/"
 
+echo STAGE_REMOTE_START
 sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
 set -euo pipefail
 set +x
