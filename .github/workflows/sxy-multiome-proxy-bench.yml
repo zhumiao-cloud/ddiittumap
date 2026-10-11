@@ -1,0 +1,55 @@
+name: SXY multiome proxy range benchmark
+on:
+  push:
+    paths:
+      - '.github/workflows/sxy-multiome-proxy-bench.yml'
+permissions:
+  contents: read
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - name: Benchmark proxied WebDAV range reads
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "${SXY_PSWD:-}"
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -T 15 -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          export HTTPS_PROXY=http://127.0.0.1:19324
+          export https_proxy=http://127.0.0.1:19324
+          src='danxibao3_webdav:P10MK1_1/GEX/P10-zc_S1_L001_R1_001.fastq.gz'
+          for p in 8 16 32 64; do
+            tmp="$(mktemp -d)"
+            t0="$(date +%s%N)"
+            ok=1
+            for i in $(seq 0 $((p-1))); do
+              (
+                off=$((i*2097152))
+                for n in 1 2; do
+                  timeout 35 rclone cat "$src" --offset "$off" --count 2097152 > "$tmp/$i.bin" && test "$(stat -c %s "$tmp/$i.bin")" = 2097152 && exit 0
+                  rm -f "$tmp/$i.bin"
+                done
+                exit 1
+              ) &
+            done
+            for pid in $(jobs -p); do wait "$pid" || ok=0; done
+            t1="$(date +%s%N)"
+            bytes="$(find "$tmp" -type f -printf '%s\n' | awk '{s+=$1} END{print s+0}')"
+            awk -v a="$t0" -v b="$t1" -v bytes="$bytes" -v p="$p" -v ok="$ok" 'BEGIN{sec=(b-a)/1e9; printf "P=%d ok=%s bytes=%d seconds=%.3f MiBps=%.3f\n",p,ok,bytes,sec,(bytes/1048576)/sec}'
+            rm -rf "$tmp"
+          done
+          REMOTE
+          unset SSHPASS SXY_PSWD
