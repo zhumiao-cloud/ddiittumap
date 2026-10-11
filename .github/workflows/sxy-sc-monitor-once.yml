@@ -46,6 +46,17 @@ jobs:
           echo '=== PARTIAL FILE ==='
           f="$D/seurobj-human/seurobj-human.rds.sxy_partial_verified"
           if timeout 20 stat -L "$f" >/dev/null 2>&1;then stat -c "PARTIAL_HUMAN_BYTES=%s" "$f";else echo "PARTIAL_HUMAN=NONE";fi
+          echo '=== STEP FINGERPRINT ==='
+          if test -s "$W/scripts/sxy_sc_strict_final_verify_20261011.R";then echo FINAL_VALIDATOR_CREATED=YES;else echo FINAL_VALIDATOR_CREATED=NO;fi
+          if test -s "$W/output/expanded_run/scripts/integrate_danxibao_species_human.R";then echo FINAL_R_SCRIPT_COPIED=YES;else echo FINAL_R_SCRIPT_COPIED=NO;fi
+          if test -s "$W/output/expanded_run/logs/expanded_human.log";then echo FINAL_LOG_COPIED=YES;else echo FINAL_LOG_COPIED=NO;fi
+          if timeout 25 test -d "$D/QC_by_sample/human"; then
+            echo DEST_QC_HUMAN_PRESENT=YES
+            printf 'REMOTE_HUMAN_QC_RDS_COUNT='
+            timeout 25 find "$D/QC_by_sample/human" -type f -name '07_seurat_cleaned.rds' | wc -l
+            printf 'DEST_PARTIAL_COUNT='
+            timeout 25 find "$D/QC_by_sample/human" -type f -name '*.sxy_partial_verified' | wc -l
+          else echo DEST_QC_HUMAN_PRESENT=NO;fi
           echo '=== ROOT ==='
           if timeout 20 stat "$D" >/dev/null 2>&1;then echo ROOT=OK;else echo ROOT=ERROR;fi
           echo SNAPSHOT_DONE
