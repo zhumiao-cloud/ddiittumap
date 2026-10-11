@@ -1,0 +1,258 @@
+name: SXY multiome GEX verified rebuild resume
+on:
+  push:
+    paths:
+      - '.github/workflows/sxy-multiome-gex-rebuild-resume.yml'
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - name: Deploy persistent verified GEX rebuild and ARC resume
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "${SXY_PSWD:-}"
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -T 15 -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          RUNNER=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner
+          SCRIPT="$RUNNER/sxy_multiome_gex_rebuild_resume.sh"
+          mkdir -p "$RUNNER"
+          cat > "$SCRIPT" <<'SCRIPT_EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          set +x
+          umask 077
+
+          MAIN_UNIT=sxy-mmul10-multiome-arc-20261010
+          OLD_RESUME=sxy-multiome-gex-resume-20261011
+          RUNNER=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner
+          BUILD_RUNNER="$RUNNER/sxy_mmul10_arc_build_and_run.sh"
+          PIPE="$RUNNER/arc_multiome_three_samples.sh"
+          WORK=/home/h3039/PROJECTS/zhumiao/multiome_arc_work/P10MK1_1
+          GEX="$WORK/input/GEX"
+          REMOTE='danxibao3_webdav:P10MK1_1/GEX'
+          MANIFEST="$GEX/md5.md5"
+          REF=/home/h3039/reference/Mmul_10_Ensembl113_ARC220
+          PROXY='http://127.0.0.1:19324'
+          CHUNK=67108864
+          PAR=24
+
+          test "$(id -un)" = h3039
+          test -s "$PIPE"
+          test -s "$BUILD_RUNNER"
+          test -s "$MANIFEST"
+          test -s "$REF/reference.json"
+          ss -ltn | grep -q '127.0.0.1:19324'
+          mkdir -p "$WORK/.rebuild_chunks"
+          export HTTPS_PROXY="$PROXY"
+          export https_proxy="$PROXY"
+          export NO_PROXY=localhost,127.0.0.1
+          export no_proxy=localhost,127.0.0.1
+
+          echo "REBUILD_BEGIN=$(date -Is)"
+          systemctl --user stop "$OLD_RESUME" 2>/dev/null || true
+          systemctl --user stop "$MAIN_UNIT" 2>/dev/null || true
+
+          rebuild_one() {
+            local f="$1" expected remote_size target chunkdir plan tmp actual planned got bad
+            target="$GEX/$f"
+            expected="$(awk -v f="$f" '$2==f{print $1}' "$MANIFEST" | head -n1)"
+            test -n "$expected"
+            remote_size="$(timeout 90 rclone lsl "$REMOTE/$f" | awk 'NR==1{print $1}')"
+            test "$remote_size" -gt 1000000
+            echo "REBUILD_FILE=$f REMOTE_SIZE=$remote_size EXPECTED_MD5=$expected"
+
+            if [ -s "$target" ] && [ "$(stat -c %s "$target")" = "$remote_size" ]; then
+              actual="$(md5sum "$target" | awk '{print $1}')"
+              if [ "$actual" = "$expected" ] && gzip -t "$target"; then
+                echo "EXISTING_FILE_ALREADY_VERIFIED=$f"
+                return
+              fi
+              echo "EXISTING_FILE_REJECTED=$f actual_md5=$actual"
+            fi
+
+            chunkdir="$WORK/.rebuild_chunks/$f"
+            plan="$chunkdir/plan.tsv"
+            mkdir -p "$chunkdir"
+            python3 - "$remote_size" "$CHUNK" "$plan" <<'PY'
+          import sys
+          end,chunk=map(int,sys.argv[1:3]); out=sys.argv[3]
+          with open(out,"w") as h:
+              i=0
+              for off in range(0,end,chunk):
+                  n=min(chunk,end-off)
+                  h.write(f"{i:08d}\t{off}\t{n}\n")
+                  i+=1
+          PY
+            export REMOTE_FILE="$REMOTE/$f" CHUNKDIR="$chunkdir"
+            xargs -P "$PAR" -n 3 bash -c '
+              set -euo pipefail
+              idx="$1"; off="$2"; cnt="$3"
+              out="$CHUNKDIR/chunk.$idx"
+              if [ -s "$out" ] && [ "$(stat -c %s "$out")" = "$cnt" ]; then exit 0; fi
+              rm -f "$out" "$out.tmp"
+              for try in 1 2 3 4 5 6 7 8; do
+                if timeout 600 rclone cat "$REMOTE_FILE" --offset "$off" --count "$cnt" > "$out.tmp" &&
+                   [ "$(stat -c %s "$out.tmp")" = "$cnt" ]; then
+                  mv "$out.tmp" "$out"
+                  exit 0
+                fi
+                rm -f "$out.tmp"
+                sleep $((try*3))
+              done
+              exit 41
+            ' _ < "$plan"
+
+            planned="$(awk '{s+=$3} END{print s+0}' "$plan")"
+            got="$(find "$chunkdir" -type f -name 'chunk.*' -printf '%s\n' | awk '{s+=$1} END{print s+0}')"
+            test "$planned" = "$got"
+            tmp="$GEX/$f.rebuild"
+            rm -f "$tmp"
+            find "$chunkdir" -type f -name 'chunk.*' -print0 | sort -z | xargs -0 cat > "$tmp"
+            test "$(stat -c %s "$tmp")" = "$remote_size"
+            actual="$(md5sum "$tmp" | awk '{print $1}')"
+            if [ "$actual" != "$expected" ]; then
+              echo "ERROR_REBUILT_MD5=$f expected=$expected actual=$actual" >&2
+              exit 43
+            fi
+            gzip -t "$tmp"
+            bad="$GEX/$f.rejected"
+            rm -f "$bad"
+            if [ -e "$target" ]; then mv -f "$target" "$bad"; fi
+            mv -f "$tmp" "$target"
+            md5sum "$target" | grep -q "^$expected "
+            gzip -t "$target"
+            rm -f "$bad"
+            rm -rf "$chunkdir"
+            echo "REBUILD_VERIFIED=$f size=$remote_size md5=$expected"
+          }
+
+          rebuild_one P10-zc_S1_L001_R1_001.fastq.gz
+          rebuild_one P10-zc_S1_L001_R2_001.fastq.gz
+          echo GEX_REBUILD_ALL_VERIFIED=PASS
+
+          python3 - "$PIPE" <<'PY'
+          import sys
+          p=sys.argv[1]
+          s=open(p,encoding='utf-8').read()
+          marker='REMOTE=danxibao3_webdav:\n'
+          if 'MULTIOME_PROXY_PATCH_20261012' not in s:
+              assert marker in s
+              s=s.replace(marker, marker+'# MULTIOME_PROXY_PATCH_20261012\nexport HTTPS_PROXY=http://127.0.0.1:19324\nexport https_proxy=http://127.0.0.1:19324\nexport NO_PROXY=localhost,127.0.0.1\nexport no_proxy=localhost,127.0.0.1\n',1)
+
+          old='''  if [ -e "$TARGET" ]; then
+              echo "存在未完成的临时目录，停止以避免覆盖：$TARGET" >&2
+              exit 24
+            fi
+            # 只允许本脚本独占其特定新目录。
+            mkdir -m 700 "$TARGET"
+            mkdir -p "$TARGET/input/GEX" "$TARGET/input/ATAC" "$TARGET/pipeline"'''
+          new='''  if [ -e "$TARGET" ]; then
+              test -d "$TARGET"
+              test "$(stat -c %U "$TARGET")" = h3039
+              echo "RESUME_EXISTING_TARGET=$TARGET"
+            else
+              mkdir -m 700 "$TARGET"
+            fi
+            mkdir -p "$TARGET/input/GEX" "$TARGET/input/ATAC" "$TARGET/pipeline"'''
+          if old in s:
+              s=s.replace(old,new,1)
+
+          s=s.replace('''rclone copy "${REMOTE}$SAMPLE/GEX" "$TARGET/input/GEX" --transfers 3 --checkers 6 --retries 5''',
+          '''rclone copy "${REMOTE}$SAMPLE/GEX" "$TARGET/input/GEX" --size-only --transfers 8 --checkers 16 \\
+              --multi-thread-streams 8 --multi-thread-cutoff 64M --multi-thread-chunk-size 16M --retries 8''')
+          s=s.replace('''rclone copy "${REMOTE}$SAMPLE/ATAC" "$TARGET/input/ATAC" --transfers 3 --checkers 6 --retries 5''',
+          '''rclone copy "${REMOTE}$SAMPLE/ATAC" "$TARGET/input/ATAC" --size-only --transfers 8 --checkers 16 \\
+              --multi-thread-streams 8 --multi-thread-cutoff 64M --multi-thread-chunk-size 16M --retries 8''')
+
+          s=s.replace('if [ "$FREE_KB" -lt 838860800 ]; then\n    echo "本地空间不足 800 GiB，停止，保留当前文件" >&2',
+                      'if [ "$FREE_KB" -lt 367001600 ]; then\n    echo "本地空间不足 350 GiB，停止，保留当前文件" >&2')
+
+          old2='''    test -f "$ZERO" && test ! -s "$ZERO" && test -s "$CONFLICT" || {
+              echo "P10MK2 index 文件状态与历史盘点不符，禁止自动修复" >&2; exit 26;
+            }
+            rm -- "$ZERO"            # 仅删除临时拷贝中的 0 字节占位文件
+            mv -- "$CONFLICT" "$ZERO" # 仅修改临时拷贝文件名'''
+          new2='''    if [ -s "$ZERO" ] && [ ! -e "$CONFLICT" ]; then
+              echo "P10MK2_I1_ALREADY_REPAIRED=YES"
+            elif [ -f "$ZERO" ] && [ ! -s "$ZERO" ] && [ -s "$CONFLICT" ]; then
+              rm -- "$ZERO"
+              mv -- "$CONFLICT" "$ZERO"
+              echo "P10MK2_I1_REPAIRED=YES"
+            else
+              echo "P10MK2 index 文件状态与预期不符，停止" >&2
+              exit 26
+            fi'''
+          if old2 in s:
+              s=s.replace(old2,new2,1)
+
+          open(p,'w',encoding='utf-8').write(s)
+          PY
+
+          bash -n "$PIPE"
+          grep -q MULTIOME_PROXY_PATCH_20261012 "$PIPE"
+          grep -q -- '--size-only --transfers 8' "$PIPE"
+          grep -q 'RESUME_EXISTING_TARGET' "$PIPE"
+          grep -q '367001600' "$PIPE"
+          echo PIPE_PATCH_VALIDATED=PASS
+
+          systemctl --user stop "$OLD_RESUME" 2>/dev/null || true
+          if systemctl --user show "$MAIN_UNIT" -p LoadState --value 2>/dev/null | grep -qx loaded; then
+            systemctl --user reset-failed "$MAIN_UNIT" 2>/dev/null || true
+            systemctl --user restart "$MAIN_UNIT"
+          else
+            systemd-run --user --unit="$MAIN_UNIT" --description="Mmul10 ARC three Multiome conversions" /usr/bin/bash "$BUILD_RUNNER"
+          fi
+          sleep 5
+          systemctl --user show "$MAIN_UNIT" -p ActiveState -p SubState -p Result -p ExecMainStatus --no-pager
+          journalctl --user -u "$MAIN_UNIT" --no-pager --output=cat -n 30 | tail -n 30 || true
+          echo "REBUILD_RESUME_COMPLETE=$(date -Is)"
+          SCRIPT_EOF
+          chmod 700 "$SCRIPT"
+          bash -n "$SCRIPT"
+
+          conf="$HOME/.config/systemd/user"
+          mkdir -p "$conf"
+          unit=sxy-multiome-gex-rebuild-20261012.service
+          cat > "$conf/$unit" <<'UNIT_EOF'
+          [Unit]
+          Description=Verified full GEX rebuild then Mmul10 Multiome ARC resume
+          After=network-online.target
+          StartLimitIntervalSec=0
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/bash /home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/sxy_multiome_gex_rebuild_resume.sh
+          Restart=on-failure
+          RestartSec=120
+          TimeoutStopSec=90
+          KillMode=control-group
+
+          [Install]
+          WantedBy=default.target
+          UNIT_EOF
+          chmod 600 "$conf/$unit"
+          systemctl --user daemon-reload
+          systemctl --user enable "$unit" >/dev/null
+          systemctl --user reset-failed "$unit" 2>/dev/null || true
+          systemctl --user restart "$unit"
+          sleep 4
+          systemctl --user show "$unit" -p ActiveState -p SubState -p Result -p NRestarts -p MainPID --no-pager
+          journalctl --user -u "$unit" --no-pager --output=cat -n 25 | tail -n 25 || true
+          echo DEPLOY_GEX_REBUILD_SERVICE=PASS
+          REMOTE
+          unset SSHPASS SXY_PSWD
