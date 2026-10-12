@@ -1,18 +1,22 @@
-name: SXY remaining root manifests
+name: SXY multiome fast-stage patch
 on:
   push:
     paths:
       - '.github/workflows/sxy-p10-atac-rebuild-status.yml'
+      - 'scripts/sxy_multiome_fast_stage.sh'
 permissions:
   contents: read
 jobs:
-  inspect:
+  deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 6
     env:
       SXY_PSWD: ${{ secrets.SXY_PSWD }}
     steps:
-      - name: Read sample-root manifest files
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Deploy fast staging helper and patch future sample staging
         shell: bash
         run: |
           set -euo pipefail
@@ -25,17 +29,48 @@ jobs:
           ssh-keyscan -T 15 -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
           chmod 600 "$HOME/.ssh/known_hosts"
           export SSHPASS="$SXY_PSWD"
+          dst=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/sxy_multiome_fast_stage.sh
+          sshpass -e scp -q -P 20111 -o StrictHostKeyChecking=yes scripts/sxy_multiome_fast_stage.sh "h3039@sxycloud1.top:$dst"
           sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
-          set -u
-          root="$HOME/PROJECTS/zhumiao/danxibao3"
-          for s in P10MK2 P20MK3; do
-            echo "SAMPLE=$s"
-            timeout 40 find "$root/$s" -maxdepth 2 -type f \( -iname '*md5*' -o -iname '*checksum*' -o -iname 'readme*' \) -printf '%P\n' 2>/dev/null | head -n 50 || true
-            for f in "$root/$s"/md5.md5 "$root/$s"/README*; do
-              [ -f "$f" ] || continue
-              echo "FILE=$(basename "$f")"
-              grep -E '^[0-9a-fA-F]{32}[[:space:]]+|fastq|FASTQ|size|MD5' "$f" 2>/dev/null | head -n 100 || true
-            done
-          done
+          set -euo pipefail
+          helper=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/sxy_multiome_fast_stage.sh
+          pipe=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/arc_multiome_three_samples.sh
+          chmod 700 "$helper"
+          bash -n "$helper"
+          test -s "$pipe"
+          cp -p "$pipe" "$pipe.before_fast_stage_patch_20261012"
+          python3 - "$pipe" "$helper" <<'PY'
+          import sys
+          p,helper=sys.argv[1:3]
+          lines=open(p,encoding="utf-8").readlines()
+          out=[]; i=0; changed=0
+          markers={
+            'rclone copy "${REMOTE}$SAMPLE/GEX"': f'  /usr/bin/bash "{helper}" "$SAMPLE" GEX "$GEX_NAME" "$TARGET/input/GEX"\n',
+            'rclone copy "${REMOTE}$SAMPLE/ATAC"': f'  /usr/bin/bash "{helper}" "$SAMPLE" ATAC "$ATAC_NAME" "$TARGET/input/ATAC"\n',
+          }
+          while i < len(lines):
+              line=lines[i]
+              hit=None
+              for marker,repl in markers.items():
+                  if marker in line:
+                      hit=repl; break
+              if hit is None:
+                  out.append(line); i+=1; continue
+              out.append(hit); changed+=1; i+=1
+              while i < len(lines) and lines[i].lstrip().startswith("--"):
+                  i+=1
+          if changed != 2:
+              raise SystemExit(f"expected 2 rclone staging commands, changed={changed}")
+          s=''.join(out)
+          if 'sxy_multiome_fast_stage.sh' not in s:
+              raise SystemExit("helper patch missing")
+          open(p,'w',encoding='utf-8').write(s)
+          PY
+          bash -n "$pipe"
+          test "$(grep -c 'sxy_multiome_fast_stage.sh' "$pipe")" -eq 2
+          ! grep -q 'rclone copy "${REMOTE}$SAMPLE/GEX"' "$pipe"
+          ! grep -q 'rclone copy "${REMOTE}$SAMPLE/ATAC"' "$pipe"
+          echo FAST_STAGE_PATCH=PASS
+          systemctl --user show sxy-p10-atac-rebuild-20261012.service -p ActiveState -p SubState -p Result --no-pager || true
           REMOTE
           unset SSHPASS SXY_PSWD
