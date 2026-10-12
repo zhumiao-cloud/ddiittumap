@@ -1,0 +1,65 @@
+name: SXY P10 ATAC verified rebuild
+on:
+  push:
+    paths:
+      - '.github/workflows/sxy-multiome-atac-rebuild.yml'
+      - 'scripts/sxy_p10_atac_verified_rebuild.sh'
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Deploy audited rebuild script and persistent service
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "${SXY_PSWD:-}"
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -T 15 -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          remote=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/sxy_p10_atac_verified_rebuild.sh
+          sshpass -e scp -q -P 20111 -o StrictHostKeyChecking=yes scripts/sxy_p10_atac_verified_rebuild.sh "h3039@sxycloud1.top:$remote"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          script=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/sxy_p10_atac_verified_rebuild.sh
+          unit=sxy-p10-atac-rebuild-20261012.service
+          chmod 700 "$script"
+          bash -n "$script"
+          mkdir -p "$HOME/.config/systemd/user"
+          cat > "$HOME/.config/systemd/user/$unit" <<'EOF'
+          [Unit]
+          Description=Verified P10 ATAC range rebuild then Multiome ARC resume
+          After=network-online.target
+          StartLimitIntervalSec=0
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/bash /home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/sxy_p10_atac_verified_rebuild.sh
+          Restart=on-failure
+          RestartSec=120
+          TimeoutStopSec=90
+          KillMode=control-group
+          [Install]
+          WantedBy=default.target
+          EOF
+          chmod 600 "$HOME/.config/systemd/user/$unit"
+          systemctl --user daemon-reload
+          systemctl --user enable "$unit" >/dev/null
+          systemctl --user reset-failed "$unit" 2>/dev/null || true
+          systemctl --user restart "$unit"
+          sleep 5
+          systemctl --user show "$unit" -p ActiveState -p SubState -p Result -p NRestarts -p MainPID --no-pager
+          journalctl --user -u "$unit" --no-pager --output=cat -n 20 | tail -n 20 || true
+          REMOTE
+          unset SSHPASS SXY_PSWD
