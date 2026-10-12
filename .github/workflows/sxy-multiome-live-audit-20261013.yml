@@ -1,0 +1,70 @@
+name: Ephemeral multiome ARC status audit
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sxy-multiome-live-audit-20261013.yml'
+permissions:
+  contents: read
+jobs:
+  audit:
+    if: github.repository == 'zhumiao-cloud/ddiittumap'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - name: Read current sample artifacts and constrained resource status
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "${SXY_PSWD:-}" || { echo 'MISSING_SECRET'; exit 21; }
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -T 15 -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 -o ServerAliveInterval=20 -o ServerAliveCountMax=5 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          ROOT=/home/h3039/PROJECTS/zhumiao/multiome_arc_work
+          echo "AUDIT_TIME=$(date -Is)"
+          echo "=== DISK ==="
+          df -h /home/h3039 | tail -1
+          echo "=== CORE_UNITS ==="
+          for u in sxy-mmul10-multiome-arc-20261010.service sxy-p10-atac-rebuild-20261012.service; do
+            echo "UNIT=$u"
+            systemctl --user show "$u" -p ActiveState -p SubState -p Result -p ExecMainStatus -p MainPID --no-pager 2>/dev/null || true
+          done
+          echo "=== SAMPLE_OUTPUTS ==="
+          for s in P10MK1_1 P10MK2 P20MK3; do
+            echo "SAMPLE=$s"
+            d="$ROOT/$s"
+            o="$d/pipeline/$s/outs"
+            test -d "$d" && { du -sh "$d" 2>/dev/null || true; } || echo LOCAL_STAGE_ABSENT
+            for f in               filtered_feature_bc_matrix/matrix.mtx.gz               filtered_feature_bc_matrix/features.tsv.gz               filtered_feature_bc_matrix/barcodes.tsv.gz               raw_feature_bc_matrix/matrix.mtx.gz               gex_possorted_bam.bam gex_possorted_bam.bam.bai               atac_possorted_bam.bam atac_possorted_bam.bam.bai               atac_fragments.tsv.gz atac_fragments.tsv.gz.tbi               filtered_feature_bc_matrix.h5 raw_feature_bc_matrix.h5; do
+              if [ -s "$o/$f" ]; then stat -c "$f|%s" "$o/$f"; else echo "$f|ABSENT"; fi
+            done
+            test -s "$d/${s}_seurat_multiome.rds" && echo RDS_LOCAL_PRESENT || echo RDS_LOCAL_ABSENT
+            if [ -s "$d/cellranger_arc_console.log" ]; then
+              echo CONSOLE_TAIL_BEGIN
+              tail -n 12 "$d/cellranger_arc_console.log" | cut -c1-220
+              echo CONSOLE_TAIL_END
+            fi
+            echo "SERVER_ARCHIVE_MARKER=$([ -f "$d/.fully_verified" ] && echo PRESENT || echo ABSENT)"
+            if timeout 15 rclone lsf "danxibao3_webdav:整理转换文件/$s" --files-only --max-depth 1 2>/dev/null | grep -Fxq '.fully_verified'; then
+              echo REMOTE_FULLY_VERIFIED=YES
+            else
+              echo REMOTE_FULLY_VERIFIED=NO
+            fi
+          done
+          echo "=== ARC PROCESS ==="
+          ps -u h3039 -o pid,etime,pcpu,rss,args | grep -E '[c]ellranger-arc count|[c]r_lib|[s]xy_multiome_fast_stage' | head -n 15 | cut -c1-230 || true
+          echo "=== PIPELINE JOURNAL TAIL ==="
+          journalctl --user -u sxy-mmul10-multiome-arc-20261010.service -n 16 --no-pager --output=cat 2>/dev/null | cut -c1-230 || true
+          echo AUDIT_COMPLETE
+          REMOTE
+          unset SSHPASS SXY_PSWD
