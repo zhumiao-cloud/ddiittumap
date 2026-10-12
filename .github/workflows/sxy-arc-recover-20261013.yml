@@ -1,0 +1,166 @@
+name: SXY ARC checkpoint-safe three-sample recovery 20261013
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/sxy-arc-recover-20261013.yml']
+permissions:
+  contents: read
+concurrency:
+  group: sxy-arc-checkpoint-recovery-20261013
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - name: Deploy guarded feature-column validator fix and run persistent sequential recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          test -n "${SXY_PSWD:-}" || { echo SXY_SECRET_MISSING; exit 9; }
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=25 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          umask 077
+          test "$(id -un)" = h3039
+          BASE=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner
+          test -d "$BASE"
+          test -s "$BASE/arc_validate_seurat.R"
+          test -s "$BASE/arc_multiome_three_samples.sh"
+          python3 - <<'PATCH'
+          from pathlib import Path
+          p=Path('/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/arc_validate_seurat.R')
+          s=p.read_text()
+          old='if (ncol(x) != expected_cols) stop("TSV 列数异常：", path)'
+          new='if (!ncol(x) %in% expected_cols) stop("TSV 列数异常：", path, "; 实际列数=", ncol(x), "; 允许列数=", paste(expected_cols, collapse="/"))'
+          old2='feat <- read_tsv(file.path(matrix_dir, "features.tsv.gz"), 3L)'
+          new2='feat <- read_tsv(file.path(matrix_dir, "features.tsv.gz"), c(3L, 6L))'
+          if old in s and old2 in s and s.count(old)==1 and s.count(old2)==1:
+              s=s.replace(old,new).replace(old2,new2)
+              p.write_text(s)
+              print('VALIDATOR_PATCH_SIX_COLUMN=APPLIED')
+          elif new in s and new2 in s:
+              print('VALIDATOR_PATCH_SIX_COLUMN=ALREADY_APPLIED')
+          else:
+              raise SystemExit('ABORT: unknown validator version')
+          PATCH
+          Rscript -e 'parse(file="/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/arc_validate_seurat.R"); cat("VALIDATOR_R_PARSE_PASS\n")' >/dev/null
+          bash -n "$BASE/arc_multiome_three_samples.sh"
+          cat > "$BASE/sxy_multiome_recovery_20261013.sh" <<'RECOVERY_SCRIPT'
+          #!/usr/bin/env bash
+          # Exact three-sample ARC recovery; runs only on the user's SXY host.
+          # P10MK1_1 ARC is COMPLETE. Never invoke ARC count for that sample again.
+          set -euo pipefail
+          set +x
+          umask 077
+          export HTTPS_PROXY=http://127.0.0.1:19324
+          export https_proxy="$HTTPS_PROXY"
+          export ARC_REFERENCE=/home/h3039/reference/Mmul_10_Ensembl113_ARC220
+          export ARC_REFERENCE_SPECIES_VERIFIED=YES
+          H=/home/h3039
+          WORK="$H/PROJECTS/zhumiao/multiome_arc_work"
+          BASE="$H/PROJECTS/zhumiao/.multiome_arc_runner"
+          T="$WORK/P10MK1_1"
+          O="$T/pipeline/P10MK1_1/outs"
+          REMOTE="danxibao3_webdav:整理转换文件/P10MK1_1"
+          MARK="$T/.fully_verified"
+          RDS="$T/P10MK1_1_seurat_multiome.rds"
+          check_disk() { df -h "$WORK"; }
+          test "$(id -un)" = h3039
+          test -s "$ARC_REFERENCE/reference.json"
+          test -s "$BASE/arc_validate_seurat.R"
+          test -s "$BASE/arc_multiome_three_samples.sh"
+          test -d "$T" && test ! -L "$T"
+          test -s "$O/filtered_feature_bc_matrix/features.tsv.gz"
+          test -s "$O/gex_possorted_bam.bam"
+          test -s "$O/atac_possorted_bam.bam"
+          grep -Fq "Pipestance completed successfully!" "$T/cellranger_arc_console.log" || {
+            echo "ABORT: P10MK1_1 ARC completion evidence missing"; exit 41;
+          }
+          if ps -u h3039 -o args= | grep -Eq '[c]ellranger-arc count'; then
+            echo "ABORT: concurrent ARC count detected"; exit 42;
+          fi
+          printf 'RECOVERY_BEGIN=%s\n' "$(date -Is)"
+          check_disk
+          if rclone lsf "$REMOTE" --files-only --max-depth 1 2>/dev/null | grep -Fxq '.fully_verified'; then
+            echo "P10MK1_1_VERIFIED_ALREADY_REMOTE"
+          else
+            if [ ! -s "$T/.postarc_rds_validated" ]; then
+              echo "P10MK1_1_RDS_VALIDATION_START"
+              Rscript "$BASE/arc_validate_seurat.R" "$O" P10MK1_1 "$RDS" 2>&1 | tee "$T/arc_validate_seurat.log"
+              test -s "$RDS"
+              printf 'validated_at=%s\n' "$(date -Is)" > "$T/.postarc_rds_validated"
+              echo "P10MK1_1_RDS_VALIDATION_PASS"
+            fi
+            test -s "$RDS"
+            test -s "$T/.postarc_rds_validated"
+            test -s "$T/libraries.csv"
+            echo "P10MK1_1_FULL_OUTS_UPLOAD_START"
+            rclone copy -L "$O" "$REMOTE/outs" --transfers 3 --checkers 6 --retries 6 --low-level-retries 12
+            for f in P10MK1_1_seurat_multiome.rds libraries.csv cellranger_arc_console.log arc_validate_seurat.log; do
+              test -s "$T/$f"
+              rclone copyto "$T/$f" "$REMOTE/$f" --retries 6 --low-level-retries 12
+            done
+            echo "P10MK1_1_REMOTE_BYTE_VERIFY_START"
+            rclone check --download -L "$O" "$REMOTE/outs" --checkers 4 --retries 6
+            for f in P10MK1_1_seurat_multiome.rds libraries.csv cellranger_arc_console.log arc_validate_seurat.log; do
+              rclone check --download --include "/$f" "$T" "$REMOTE" --checkers 2 --retries 5
+            done
+            printf 'sample=P10MK1_1 verified_at=%s\n' "$(date -Is)" > "$MARK"
+            rclone copyto "$MARK" "$REMOTE/.fully_verified" --retries 5
+            rclone check --download --include '/.fully_verified' "$T" "$REMOTE" --checkers 2
+            echo "P10MK1_1_ALL_OFFICIAL_OUTS_BAM_RDS_AND_LOGS_REMOTE_VERIFIED"
+          fi
+          if ! rclone lsf "$REMOTE" --files-only --max-depth 1 | grep -Fxq '.fully_verified'; then
+            echo "ABORT: missing P10MK1_1 verification marker"; exit 43;
+          fi
+          # Delete only this sample's reconstructible local scratch, never source or other projects.
+          test "$(realpath -m "$T")" = "$WORK/P10MK1_1"
+          test ! -L "$T"
+          test -d "$O"
+          echo "P10MK1_1_VERIFIED_TEMP_CLEANUP_START"
+          rm -rf --one-file-system -- "$T"
+          test ! -e "$T"
+          echo "P10MK1_1_LOCAL_SCRATCH_RELEASED"
+          check_disk
+          echo "REMAINING_TWO_SAMPLES_START=$(date -Is)"
+          # The existing workflow skips P10MK1_1 solely because the remote verification marker exists.
+          exec /usr/bin/bash "$BASE/arc_multiome_three_samples.sh"
+          RECOVERY_SCRIPT
+          chmod 700 "$BASE/sxy_multiome_recovery_20261013.sh"
+          bash -n "$BASE/sxy_multiome_recovery_20261013.sh"
+          test -s /home/h3039/reference/Mmul_10_Ensembl113_ARC220/reference.json
+          test -s /home/h3039/PROJECTS/zhumiao/multiome_arc_work/P10MK1_1/pipeline/P10MK1_1/outs/filtered_feature_bc_matrix/features.tsv.gz
+          if ps -u h3039 -o args= | grep -Eq '[c]ellranger-arc count'; then
+            echo ABORT_CONCURRENT_ARC_COUNT
+            exit 40
+          fi
+          for unit in sxy-mmul10-multiome-arc-20261010 sxy-mmul10-multiome-recovery-20261013; do
+            state=$(systemctl --user show "$unit.service" -p ActiveState --value 2>/dev/null || true)
+            echo "SERVICE_PRECHECK=$unit:$state"
+            if [ "$state" = active ] || [ "$state" = activating ]; then
+              echo ABORT_CONCURRENT_SERVICE
+              exit 41
+            fi
+          done
+          echo "FREE_BEFORE=$(df -BG --output=avail /home/h3039 | tail -n 1 | xargs)"
+          systemd-run --user --unit=sxy-mmul10-multiome-recovery-20261013 \
+            --description="Verified P10 ARC postprocess and remaining two sequential Multiome ARC samples" \
+            /usr/bin/bash "$BASE/sxy_multiome_recovery_20261013.sh"
+          sleep 5
+          systemctl --user show sxy-mmul10-multiome-recovery-20261013.service -p ActiveState -p SubState -p MainPID -p Result --no-pager
+          journalctl --user -u sxy-mmul10-multiome-recovery-20261013.service -n 12 --no-pager --output=cat | cut -c1-220
+          echo RECOVERY_UNIT_DEPLOY_DONE
+          REMOTE
+          unset SSHPASS SXY_PSWD
