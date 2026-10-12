@@ -1,0 +1,66 @@
+name: SXY Multiome rclone 153 compatibility repair
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/sxy-multiome-local-rclone-fix-20261013.yml']
+permissions:
+  contents: read
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - name: Remove unsupported options and restart local-only multiome sequence
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "${SXY_PSWD:-}" || exit 14
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=25 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          test "$(id -un)" = h3039
+          SCRIPT=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/arc_multiome_remaining_local_only_20261013.sh
+          WORK=/home/h3039/PROJECTS/zhumiao/multiome_arc_work
+          OLD=sxy-mmul10-multiome-local-two-20261013.service
+          test -s "$SCRIPT"
+          state=$(systemctl --user show "$OLD" -p ActiveState --value)
+          echo "PREVIOUS_JOB_STATE=$state"
+          if [ "$state" = active ] || [ "$state" = activating ]; then echo ABORT_CONCURRENT_OLD_SERVICE; exit 41; fi
+          if ps -u h3039 -o args= | grep -Eq '[c]ellranger-arc count|[R]script.*arc_validate_seurat'; then
+            echo ABORT_OTHER_ARC_TASK_RUNNING; exit 42
+          fi
+          python3 - "$SCRIPT" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]);s=p.read_text()
+          old=' --multi-thread-streams 8 --multi-thread-cutoff 64M --multi-thread-chunk-size 16M'
+          if s.count(old)!=2:
+              raise SystemExit('EXPECTED_TWO_OLD_FLAGS_NOT_FOUND')
+          s=s.replace(old,'')
+          if any(k in s for k in ('rclone copyto','rclone sync','rclone purge','rm -rf')):
+              raise SystemExit('UNSAFE_COMMAND_DETECTED')
+          p.write_text(s)
+          print('RCLONE_COMPATIBILITY_PATCH_PASS=2_OCCURRENCES')
+          PY
+          bash -n "$SCRIPT"
+          chmod 700 "$SCRIPT"
+          systemd-run --user --unit=sxy-mmul10-multiome-local-two-v2-20261013 \
+            --description="Local-only P10MK2 and P20MK3 ARC full outputs compatible rclone 1.53" \
+            /usr/bin/flock -n "$WORK/.multiome_arc_local_two.lock" \
+            /usr/bin/bash "$SCRIPT"
+          sleep 5
+          systemctl --user show sxy-mmul10-multiome-local-two-v2-20261013.service -p ActiveState -p SubState -p MainPID -p Result -p ExecMainStatus
+          journalctl --user -u sxy-mmul10-multiome-local-two-v2-20261013.service -n 10 --no-pager --output=cat | cut -c1-200
+          echo RCLONE_REPAIR_LAUNCH_DONE
+          REMOTE
+          unset SSHPASS SXY_PSWD
