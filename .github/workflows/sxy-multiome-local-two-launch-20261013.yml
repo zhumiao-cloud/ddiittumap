@@ -1,0 +1,211 @@
+name: SXY two remaining Multiome local only launch 20261013
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/sxy-multiome-local-two-launch-20261013.yml']
+permissions:
+  contents: read
+concurrency:
+  group: sxy-local-two-only-launch
+  cancel-in-progress: false
+jobs:
+  launch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - name: Install audited local-only ARC runner and launch on persistent server service
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          test -n "${SXY_PSWD:-}" || { echo MISSING_SXY_SECRET; exit 14; }
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=25 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          umask 077
+          test "$(id -un)" = h3039
+          BASE=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner
+          WORK=/home/h3039/PROJECTS/zhumiao/multiome_arc_work
+          test -s "$BASE/arc_validate_seurat.R"
+          test -s /home/h3039/reference/Mmul_10_Ensembl113_ARC220/reference.json
+          test -s "$WORK/P10MK1_1/.postarc_rds_validated"
+          test -s "$WORK/P10MK1_1/P10MK1_1_seurat_multiome.rds"
+          test -s "$WORK/P10MK1_1/pipeline/P10MK1_1/outs/gex_possorted_bam.bam"
+          test -s "$WORK/P10MK1_1/pipeline/P10MK1_1/outs/atac_possorted_bam.bam"
+          echo "P10MK1_LOCAL_COMPLETION_PRESERVED=YES"
+          if ps -u h3039 -o args= | grep -Eq '[c]ellranger-arc count|[R]script.*arc_validate_seurat'; then
+            echo "ABORT_EXISTING_COUNT_OR_RDS_VALIDATION"; exit 43
+          fi
+          UNIT=sxy-mmul10-multiome-local-two-20261013.service
+          STATE=$(systemctl --user show "$UNIT" -p ActiveState --value 2>/dev/null || :)
+          echo "EXISTING_LOCAL_UNIT=$STATE"
+          if [ "$STATE" = active ] || [ "$STATE" = activating ]; then
+            echo LOCAL_ARC_ALREADY_RUNNING
+            exit 0
+          fi
+          cat > "$BASE/arc_multiome_remaining_local_only_20261013.sh.tmp" <<'LOCAL_SCRIPT'
+          #!/usr/bin/env bash
+          # Local-only ARC 2.2.0 count, RDS validation, and full pipestance retention.
+          # Source is read-only rclone WebDAV; NEVER upload, delete outputs, or modify original source.
+          set -euo pipefail
+          set +x
+          umask 077
+          export HTTPS_PROXY=http://127.0.0.1:19324
+          export https_proxy="$HTTPS_PROXY"
+          export ARC_REFERENCE=/home/h3039/reference/Mmul_10_Ensembl113_ARC220
+          export ARC_REFERENCE_SPECIES_VERIFIED=YES
+          ROOT=/home/h3039/PROJECTS/zhumiao/danxibao3
+          WORK=/home/h3039/PROJECTS/zhumiao/multiome_arc_work
+          BASE=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner
+          REMOTE='danxibao3_webdav:'
+          ARC=/home/h3039/software/cellranger-arc-2.2.0/cellranger-arc
+          VALIDATOR="$BASE/arc_validate_seurat.R"
+          MIN_AFTER_INPUT=268435456000 # 250 GiB for full ARC pipeline and disk safety
+          test "$(id -un)" = h3039
+          test -s "$ARC_REFERENCE/reference.json"
+          test -x "$ARC"
+          test -s "$VALIDATOR"
+          test -d "$ROOT" && test -d "$WORK"
+          command -v rclone >/dev/null
+          command -v Rscript >/dev/null
+          "$ARC" --version
+          echo "LOCAL_ONLY_START=$(date -Is)"
+          echo "NO_WEBDAV_WRITES_NO_AUTO_CLEANUP=YES"
+          free_bytes() { df -B1 --output=avail "$WORK" | tail -n 1 | tr -d ' '; }
+          source_bytes() {
+            local src="$1"
+            rclone lsf "$src" --files-only --recursive --format sp --separator '|' |
+              awk -F '|' '{if ($1 ~ /^[0-9]+$/) {s+=$1; n++} else exit 15} END{if(n==0) exit 16; printf "%.0f\n",s}'
+          }
+          for SAMPLE in P10MK2 P20MK3; do
+            case "$SAMPLE" in
+              P10MK2) ATAC_NAME=2-ATAC; GEX_NAME=2-GEX ;;
+              P20MK3) ATAC_NAME=P20; GEX_NAME=P20 ;;
+              *) echo INVALID_SAMPLE >&2; exit 19 ;;
+            esac
+            TARGET="$WORK/$SAMPLE"
+            OUTS="$TARGET/pipeline/$SAMPLE/outs"
+            DONE="$TARGET/.local_arc_verified"
+            RDS="$TARGET/${SAMPLE}_seurat_multiome.rds"
+            echo "SAMPLE_BEGIN=$SAMPLE DATE=$(date -Is) FREE_BYTES=$(free_bytes)"
+            if test -s "$DONE"; then
+              for file in filtered_feature_bc_matrix/matrix.mtx.gz raw_feature_bc_matrix/matrix.mtx.gz gex_possorted_bam.bam atac_possorted_bam.bam atac_fragments.tsv.gz; do
+                test -s "$OUTS/$file" || { echo "LOCAL_MARKER_BUT_MISSING=$SAMPLE/$file"; exit 20; }
+              done
+              test -s "$RDS"
+              echo "SAMPLE_ALREADY_LOCAL_VERIFIED=$SAMPLE"
+              continue
+            fi
+            if test -e "$TARGET"; then
+              test -d "$TARGET" && test ! -L "$TARGET"
+              test "$(stat -c '%U' "$TARGET")" = h3039
+              echo "REUSE_CHECKPOINT=$TARGET"
+            else
+              mkdir -m 700 "$TARGET"
+            fi
+            mkdir -p "$TARGET/input/GEX" "$TARGET/input/ATAC" "$TARGET/pipeline"
+            if test ! -s "$OUTS/gex_possorted_bam.bam" || test ! -s "$OUTS/atac_possorted_bam.bam"; then
+              GEX_BYTES=$(source_bytes "${REMOTE}$SAMPLE/GEX")
+              ATAC_BYTES=$(source_bytes "${REMOTE}$SAMPLE/ATAC")
+              NEED=$((GEX_BYTES + ATAC_BYTES))
+              # Conservative reservation; if source copies partially downloaded, overestimates need safely.
+              FREE=$(free_bytes)
+              printf 'PREFLIGHT=%s GEX_BYTES=%s ATAC_BYTES=%s SOURCE_TOTAL=%s FREE_BYTES=%s\n' "$SAMPLE" "$GEX_BYTES" "$ATAC_BYTES" "$NEED" "$FREE"
+              if (( FREE < NEED + MIN_AFTER_INPUT )); then
+                echo "CAPACITY_GUARD_STOP=$SAMPLE REQUIRED_BEFORE=$( (echo "$NEED + $MIN_AFTER_INPUT") | bc ) FREE=$FREE"
+                exit 25
+              fi
+              echo "STAGE_READ_ONLY_SOURCE=$SAMPLE"
+              rclone copy "${REMOTE}$SAMPLE/GEX" "$TARGET/input/GEX" --size-only --transfers 8 --checkers 16 --multi-thread-streams 8 --multi-thread-cutoff 64M --multi-thread-chunk-size 16M --retries 5
+              rclone copy "${REMOTE}$SAMPLE/ATAC" "$TARGET/input/ATAC" --size-only --transfers 8 --checkers 16 --multi-thread-streams 8 --multi-thread-cutoff 64M --multi-thread-chunk-size 16M --retries 5
+              if [ "$SAMPLE" = P10MK2 ]; then
+                ZERO="$TARGET/input/ATAC/2-ATAC_S1_L001_I1_001.fastq.gz"
+                CONFLICT="$TARGET/input/ATAC/2-ATAC_S1_L001_I1_001.fastq_冲突文件_root_20260415215159.gz"
+                if test -s "$ZERO" && test ! -e "$CONFLICT"; then
+                  echo P10MK2_INDEX_ALREADY_REPAIRED
+                elif test -f "$ZERO" && test ! -s "$ZERO" && test -s "$CONFLICT"; then
+                  rm -- "$ZERO"
+                  mv -- "$CONFLICT" "$ZERO"
+                  echo P10MK2_INDEX_REPAIRED_LOCAL_ONLY
+                else
+                  echo P10MK2_INDEX_AMBIGUOUS_STOP >&2; exit 26
+                fi
+              fi
+              for L in 001 002 003 004; do
+                for READ in I1 R1 R2 R3; do
+                  test -s "$TARGET/input/ATAC/${ATAC_NAME}_S1_L${L}_${READ}_001.fastq.gz" || { echo "MISSING_ATAC=$SAMPLE/$L/$READ"; exit 27; }
+                done
+              done
+              for READ in R1 R2; do
+                test -s "$TARGET/input/GEX/${GEX_NAME}_S1_L001_${READ}_001.fastq.gz" || { echo "MISSING_GEX=$SAMPLE/$READ"; exit 28; }
+              done
+              echo "FASTQ_GZIP_CRC_START=$SAMPLE"
+              find "$TARGET/input" -type f -name '*.fastq.gz' -print0 | sort -z | xargs -0 -r -P 6 -n 1 gzip -t
+              echo "FASTQ_GZIP_CRC_PASS=$SAMPLE"
+              {
+                echo fastqs,sample,library_type
+                printf '%s,%s,%s\n' "$TARGET/input/GEX" "$GEX_NAME" 'Gene Expression'
+                printf '%s,%s,%s\n' "$TARGET/input/ATAC" "$ATAC_NAME" 'Chromatin Accessibility'
+              } > "$TARGET/libraries.csv"
+              FREE=$(free_bytes)
+              echo "AFTER_STAGE_FREE_BYTES=$FREE"
+              if ((FREE < MIN_AFTER_INPUT)); then
+                echo "CAPACITY_GUARD_STOP_POST_STAGE=$SAMPLE" >&2; exit 29
+              fi
+              # Checkpoint-aware: never recompute the completed official count.
+              if ! (test -s "$OUTS/filtered_feature_bc_matrix/matrix.mtx.gz" &&
+                    test -s "$OUTS/gex_possorted_bam.bam" &&
+                    test -s "$OUTS/atac_possorted_bam.bam" &&
+                    test -f "$TARGET/cellranger_arc_console.log" &&
+                    grep -Fq 'Pipestance completed successfully!' "$TARGET/cellranger_arc_console.log"); then
+                echo "ARC_COUNT_BEGIN=$SAMPLE $(date -Is)"
+                cd "$TARGET/pipeline"
+                "$ARC" count --id="$SAMPLE" --reference="$ARC_REFERENCE" --libraries="$TARGET/libraries.csv" \
+                  --create-bam=true --localcores=64 --localmem=700 2>&1 | tee -a "$TARGET/cellranger_arc_console.log"
+              fi
+            fi
+            # If full outs present from earlier run, avoid re-running count at all.
+            for file in filtered_feature_bc_matrix/matrix.mtx.gz filtered_feature_bc_matrix/features.tsv.gz filtered_feature_bc_matrix/barcodes.tsv.gz raw_feature_bc_matrix/matrix.mtx.gz filtered_feature_bc_matrix.h5 raw_feature_bc_matrix.h5 gex_possorted_bam.bam gex_possorted_bam.bam.bai atac_possorted_bam.bam atac_possorted_bam.bam.bai atac_fragments.tsv.gz atac_fragments.tsv.gz.tbi; do
+              test -s "$OUTS/$file" || { echo "MISSING_OFFICIAL_OUTS=$SAMPLE/$file"; exit 30; }
+            done
+            echo "OFFICIAL_ARC_OUTS_PASS=$SAMPLE"
+            if ! test -s "$TARGET/.postarc_rds_validated"; then
+              echo "RDS_VALIDATION_START=$SAMPLE"
+              Rscript "$VALIDATOR" "$OUTS" "$SAMPLE" "$RDS" 2>&1 | tee "$TARGET/arc_validate_seurat.log"
+              echo "RDS_VALIDATION_PASS=$SAMPLE"
+              printf 'validated_at=%s\n' "$(date -Is)" > "$TARGET/.postarc_rds_validated"
+            fi
+            test -s "$RDS" && test -s "$TARGET/.postarc_rds_validated"
+            cp -- "$VALIDATOR" "$TARGET/arc_validate_seurat.R"
+            find "$OUTS" -type f -printf '%P\t%s\n' | LC_ALL=C sort > "$TARGET/official_outs_files.tsv"
+            printf 'sample=%s\narc_version=2.2.0\nreference=%s\nlocal_verified_at=%s\nretention=all_official_outs_pipeline_BAM_RDS_logs_and_input\n' \
+              "$SAMPLE" "$ARC_REFERENCE" "$(date -Is)" > "$DONE"
+            echo "LOCAL_ARC_SAMPLE_COMPLETE=$SAMPLE $(date -Is) FREE_BYTES=$(free_bytes)"
+          done
+          echo "BOTH_REMAINING_ARC_LOCAL_SAMPLES_COMPLETE=$(date -Is)"
+          LOCAL_SCRIPT
+          bash -n "$BASE/arc_multiome_remaining_local_only_20261013.sh.tmp"
+          mv -- "$BASE/arc_multiome_remaining_local_only_20261013.sh.tmp" "$BASE/arc_multiome_remaining_local_only_20261013.sh"
+          chmod 700 "$BASE/arc_multiome_remaining_local_only_20261013.sh"
+          echo "FREE_DISK_BYTES=$(df -B1 --output=avail "$WORK" | tail -n 1 | tr -d ' ')"
+          echo "RUNNER_SCRIPT_PARSE=PASS"
+          systemd-run --user --unit=sxy-mmul10-multiome-local-two-20261013 \
+            --description="P10MK2 and P20MK3 ARC local only; retain complete outs BAM FASTQs RDS logs" \
+            /usr/bin/flock -n "$WORK/.multiome_arc_local_two.lock" \
+            /usr/bin/bash "$BASE/arc_multiome_remaining_local_only_20261013.sh"
+          sleep 6
+          systemctl --user show "$UNIT" -p MainPID -p ActiveState -p SubState -p Result -p ExecMainStatus
+          journalctl --user -u "$UNIT" -n 14 --no-pager --output=cat | cut -c1-210
+          echo "LOCAL_TWO_LAUNCH_ACTION_FINISHED"
+          REMOTE
+          unset SSHPASS SXY_PSWD
