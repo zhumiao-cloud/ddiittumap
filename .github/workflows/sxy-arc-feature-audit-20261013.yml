@@ -1,0 +1,70 @@
+name: SXY ARC feature columns audit 20261013
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/sxy-arc-feature-audit-20261013.yml']
+permissions:
+  contents: read
+concurrency:
+  group: sxy-arc-feature-audit-20261013
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - name: Inspect MEX feature columns and R environment without modifying source
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          test -n "${SXY_PSWD:-}" || { echo SXY_SECRET_MISSING; exit 9; }
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=25 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          M=/home/h3039/PROJECTS/zhumiao/multiome_arc_work/P10MK1_1
+          O="$M/pipeline/P10MK1_1/outs"
+          test "$(id -un)" = h3039
+          test -s "$O/filtered_feature_bc_matrix/features.tsv.gz"
+          python3 - "$O" <<'PY'
+          import gzip,collections,os,sys
+          o=sys.argv[1]
+          for kind in ("filtered_feature_bc_matrix","raw_feature_bc_matrix"):
+              print("MEX_KIND="+kind,flush=True)
+              d=os.path.join(o,kind)
+              for name in ("features.tsv.gz","barcodes.tsv.gz"):
+                  p=os.path.join(d,name)
+                  if not os.path.isfile(p): continue
+                  counts=collections.Counter()
+                  examples={}
+                  with gzip.open(p,"rt") as f:
+                      for idx,line in enumerate(f):
+                          fields=line.rstrip("\n").split("\t")
+                          counts[len(fields)]+=1
+                          if len(examples)<8 and (idx<4 or len(fields) not in examples):
+                              examples[len(fields)]=[str(idx+1),fields[:5]]
+                  print(name,"columns_distribution",dict(counts),"examples",examples,flush=True)
+              with gzip.open(os.path.join(d,"matrix.mtx.gz"),"rt") as f:
+                  for line in f:
+                      if not line.startswith("%"):
+                          print("MATRIX_SHAPE",line.strip());break
+          PY
+          echo "SERVER_R="
+          Rscript -e 'cat("R=",as.character(getRversion())," Seurat=",if(requireNamespace("Seurat",quietly=TRUE)) as.character(packageVersion("Seurat")) else "MISSING"," Signac=",if(requireNamespace("Signac",quietly=TRUE)) as.character(packageVersion("Signac")) else "MISSING"," Matrix=",if(requireNamespace("Matrix",quietly=TRUE)) as.character(packageVersion("Matrix")) else "MISSING","\n",sep="")'
+          echo SERVER_PIPELINE_SCRIPT
+          ls -l /home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/arc_validate_seurat.R /home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/arc_multiome_three_samples.sh
+          echo DISK
+          df -h /home/h3039
+          echo READ_ONLY_FEATURE_AUDIT_FINISHED
+          REMOTE
+          unset SSHPASS SXY_PSWD
