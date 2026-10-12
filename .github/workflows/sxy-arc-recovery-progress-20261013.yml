@@ -52,6 +52,11 @@ jobs:
               echo REMOTE_VERIFIED_NO
             fi
           done
+          echo "=== VALIDATOR_LOG ==="
+          p=/home/h3039/PROJECTS/zhumiao/multiome_arc_work/P10MK1_1/arc_validate_seurat.log
+          if test -f "$p"; then stat -c 'R_VALIDATOR_LOG_BYTES=%s' "$p"; tail -n 18 "$p" | cut -c1-240; fi
+          echo "=== ALL_R_PROCESSES ==="
+          ps -u h3039 -o pid,etimes,pcpu,rss,comm,args | grep -E '[R] --no-echo|[R]script|[R] --slave' | head -n 9 | cut -c1-180 || true
           echo "=== RESOURCE ==="
           df -h /home/h3039
           ps -u h3039 -o pid,etime,pcpu,rss,comm | grep -E 'Rscript|cellranger-arc|rclone|pigz|samtools|bash' | tail -n 18 || true
