@@ -1,0 +1,69 @@
+name: SXY ARC three-sample private-status readout
+on:
+  push:
+    paths:
+      - '.github/workflows/sxy-arc-audit-20261013.yml'
+permissions:
+  contents: read
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - name: Authorized read-only SXY ARC status
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "${SXY_PSWD:-}" || { echo 'SECRET_UNAVAILABLE'; exit 10; }
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 -o ServerAliveInterval=20 -o ServerAliveCountMax=5 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          echo "PROBE_TIME=$(date -Is)"
+          echo '=== UNIT_STATUS ==='
+          for u in sxy-p10-atac-rebuild-20261012.service sxy-mmul10-multiome-arc-20261010.service sxy-mmul10-multiome-arc-parallel-20261010.service; do
+            echo "UNIT=$u"
+            systemctl --user show "$u" -p LoadState -p ActiveState -p SubState -p Result -p ExecMainStatus -p NRestarts -p MainPID --no-pager 2>/dev/null || true
+          done
+          echo '=== REFERENCE ==='
+          test -s "$HOME/reference/Mmul_10_Ensembl113_ARC220/reference.json" && echo REFERENCE_OK=YES || echo REFERENCE_OK=NO
+          echo '=== SAMPLES ==='
+          for s in P10MK1_1 P10MK2 P20MK3; do
+            d="$HOME/PROJECTS/zhumiao/multiome_arc_work/$s"
+            o="$d/pipeline/$s/outs"
+            echo "SAMPLE=$s"
+            if [ -d "$d" ]; then
+              echo "LOCAL_DIR=YES"
+              du -sh "$d" 2>/dev/null | awk '{print "LOCAL_SIZE="$1}'
+              printf 'INPUT_FASTQ='; find "$d/input" -type f -name '*.fastq.gz' 2>/dev/null | wc -l
+              printf 'INPUT_GEX_FASTQ='; find "$d/input/GEX" -type f -name '*.fastq.gz' 2>/dev/null | wc -l
+              printf 'INPUT_ATAC_FASTQ='; find "$d/input/ATAC" -type f -name '*.fastq.gz' 2>/dev/null | wc -l
+              test -s "$d/cellranger_arc_console.log" && { echo CONSOLE=YES; tail -n 3 "$d/cellranger_arc_console.log" | sed -E 's@/home/h3039/[^ ]+@<PATH>@g' | cut -c 1-180; } || echo CONSOLE=NO
+              test -d "$d/pipeline/$s" && echo MARTIAN_PIPELINE=YES || echo MARTIAN_PIPELINE=NO
+            else
+              echo LOCAL_DIR=NO
+            fi
+            for f in filtered_feature_bc_matrix/matrix.mtx.gz filtered_feature_bc_matrix/features.tsv.gz filtered_feature_bc_matrix/barcodes.tsv.gz gex_possorted_bam.bam atac_possorted_bam.bam; do
+              if [ -s "$o/$f" ]; then echo "OUT_$f=YES"; else echo "OUT_$f=NO"; fi
+            done
+            test -s "$d/${s}_seurat_multiome.rds" && echo SEURAT_RDS=YES || echo SEURAT_RDS=NO
+            echo "REMOTE_CHECK=$s"
+            if timeout 14 rclone lsf "danxibao3_webdav:整理转换文件/$s" --files-only --max-depth 1 2>/dev/null | grep -qFx '.fully_verified'; then echo REMOTE_FULLY_VERIFIED=YES; else echo REMOTE_FULLY_VERIFIED=NO; fi
+          done
+          echo '=== RUNNING ==='
+          printf 'ARC_PROCESS_COUNT='; ps -u h3039 -o args= | grep -Ec '[c]ellranger-arc count' || true
+          printf 'STAGING_PROCESS_COUNT='; ps -u h3039 -o args= | grep -Ec '[s]xy_multiome_fast_stage|[s]xy_p10_atac_verified_rebuild' || true
+          echo '=== DISK ==='
+          df -h "$HOME" | tail -n 1 | awk '{printf "DISK_TOTAL=%s DISK_USED=%s DISK_AVAIL=%s DISK_USE_PERCENT=%s\n",$2,$3,$4,$5}'
+          echo ARC_STATUS_END=PASS
+          REMOTE
+          unset SSHPASS SXY_PSWD
