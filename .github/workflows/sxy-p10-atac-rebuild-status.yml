@@ -1,4 +1,4 @@
-name: SXY remaining manifests
+name: SXY remaining root manifests
 on:
   push:
     paths:
@@ -12,7 +12,7 @@ jobs:
     env:
       SXY_PSWD: ${{ secrets.SXY_PSWD }}
     steps:
-      - name: Read mounted checksum manifests
+      - name: Read sample-root manifest files
         shell: bash
         run: |
           set -euo pipefail
@@ -29,12 +29,12 @@ jobs:
           set -u
           root="$HOME/PROJECTS/zhumiao/danxibao3"
           for s in P10MK2 P20MK3; do
-            for lib in GEX ATAC; do
-              echo "SECTION=$s/$lib"
-              find "$root/$s/$lib" -maxdepth 1 -type f \( -iname '*md5*' -o -iname 'readme*' \) -printf '%f\n' 2>/dev/null | head -n 20 || true
-              if [ -f "$root/$s/$lib/md5.md5" ]; then
-                grep -E '^[0-9a-fA-F]{32}[[:space:]]+' "$root/$s/$lib/md5.md5" | head -n 100 || true
-              fi
+            echo "SAMPLE=$s"
+            timeout 40 find "$root/$s" -maxdepth 2 -type f \( -iname '*md5*' -o -iname '*checksum*' -o -iname 'readme*' \) -printf '%P\n' 2>/dev/null | head -n 50 || true
+            for f in "$root/$s"/md5.md5 "$root/$s"/README*; do
+              [ -f "$f" ] || continue
+              echo "FILE=$(basename "$f")"
+              grep -E '^[0-9a-fA-F]{32}[[:space:]]+|fastq|FASTQ|size|MD5' "$f" 2>/dev/null | head -n 100 || true
             done
           done
           REMOTE
