@@ -1,0 +1,76 @@
+name: SXY multiome priority local disk audit
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/sxy-macaque-multiome-disk-20261013.yml']
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - name: Read-only server capacity and task inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          if [ -z "${SXY_PSWD:-}" ]; then echo MISSING_AUTH_SECRET; exit 20; fi
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get -qq update
+          sudo apt-get install -qq -y sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o BatchMode=no -o ConnectTimeout=25 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -uo pipefail
+          H=/home/h3039
+          W=$H/PROJECTS/zhumiao/.sxy_macaca_lung_work
+          M=$H/PROJECTS/zhumiao/multiome_arc_work
+          echo '===== HOME_LOCAL_DISK ====='
+          df -B1 --output=source,size,used,avail,pcent,target "$H" | tail -n 1
+          echo '===== ALL_RELEVANT_LOCAL_DISKS ====='
+          df -h "$H" "$W" "$M" /tmp | tail -n +2
+          echo '===== LOCAL_SIZE_GROUPS ====='
+          for p in "$W" "$W/local_fastqs" "$W/counts" "$W/validated" "$M" "$H/reference" "$H/.cache" /tmp; do
+            printf 'SIZE_PATH=%s ' "$p"
+            timeout 80 du -sxh "$p" 2>/dev/null | awk '{print "SIZE="$1}' || echo SIZE_TIMEOUT_OR_MISSING
+          done
+          echo '===== MACAQUE_UNIT_STATUS ====='
+          for s in sxy-macaque-lung-resumable.service sxy-macaque-lung-matrix-20261010.service sxy-mmul10-multiome-arc-20261010.service sxy-p10-atac-rebuild-20261012.service; do
+            printf '%s ' "$s"
+            systemctl --user show "$s" -p ActiveState -p SubState -p Result --no-pager 2>/dev/null | tr '\n' ' '
+            echo
+          done
+          echo '===== MACAQUE_PER_SAMPLE_LOCAL_BYTES ====='
+          python3 - <<'PY'
+          import os,pathlib
+          w=pathlib.Path.home()/'PROJECTS/zhumiao/.sxy_macaca_lung_work'
+          out=pathlib.Path.home()/'PROJECTS/zhumiao/danxibao2/数据清理整理/刘光慧食蟹猴肺'
+          ids=['Lung_'+s for s in ('YM1','YM2','YM3','YM4','YF1','YF2','YF3','YF4','OM2','OM3','OM4','OF1','OF2','OF3','OF4')]
+          for n in ids:
+              fast=w/'local_fastqs'/n;count=w/'counts'/n/'outs'
+              fast_size=0; partial=0; complete_fq=0
+              try:
+                  for f in fast.iterdir():
+                      if f.is_file() and not f.is_symlink():
+                          sz=f.stat().st_size
+                          fast_size+=sz
+                          if f.name.endswith('.part'):partial+=sz
+                          if f.name.endswith('.fastq.gz'):complete_fq+=1
+              except (FileNotFoundError,OSError): pass
+              counts_exists=all((count/'filtered_feature_bc_matrix'/x).is_file() for x in ('matrix.mtx.gz','features.tsv.gz','barcodes.tsv.gz'))
+              final=out/n
+              final_mex=all((final/'10x'/x).is_file() for x in ('matrix.mtx.gz','features.tsv.gz','barcodes.tsv.gz'))
+              marker=(final/'VALIDATION_PASS.txt').is_file()
+              rds=(final/(n+'_seurat.rds')).is_file()
+              print(f'SAMPLE {n} FASTQ_BYTES={fast_size} PART_BYTES={partial} COMPLETE_FASTQ={complete_fq}/8 CELLRANGER_MEX={int(counts_exists)} OUTPUT_MEX={int(final_mex)} RDS={int(rds)} VALID={int(marker)}',flush=True)
+          PY
+          echo '===== CURRENT_PROCESSES_SUMMARY ====='
+          ps -u h3039 -o comm= | sort | uniq -c | grep -E 'python3|cellranger|martian|rclone|STAR|dd|Rscript|samtools' || true
+          echo READ_ONLY_CAPACITY_AUDIT_PASS
+          REMOTE
+          unset SSHPASS SXY_PSWD
