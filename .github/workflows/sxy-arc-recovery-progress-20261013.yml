@@ -57,6 +57,30 @@ jobs:
           if test -f "$p"; then stat -c 'R_VALIDATOR_LOG_BYTES=%s' "$p"; tail -n 18 "$p" | cut -c1-240; fi
           echo "=== ALL_R_PROCESSES ==="
           ps -u h3039 -o pid,etimes,pcpu,rss,comm,args | grep -E '[R] --no-echo|[R]script|[R] --slave' | head -n 9 | cut -c1-180 || true
+          echo "=== RDS_RELOAD_FEATURE_DIAGNOSTIC ==="
+          RDS=/home/h3039/PROJECTS/zhumiao/multiome_arc_work/P10MK1_1/P10MK1_1_seurat_multiome.rds
+          if test -s "$RDS" && ! ps -u h3039 -o args= | grep -Eq '[R]script.*arc_validate_seurat'; then
+            Rscript - "$RDS" <<'RS'
+          suppressPackageStartupMessages(library(Seurat))
+          p <- commandArgs(trailingOnly=TRUE)[1]
+          f <- file.path(dirname(p),"pipeline","P10MK1_1","outs","filtered_feature_bc_matrix","features.tsv.gz")
+          expected <- read.delim(gzfile(f),header=FALSE,sep="\t",quote="",comment.char="",stringsAsFactors=FALSE)
+          o <- readRDS(p)
+          for (type in c("RNA","ATAC")) {
+            actual <- rownames(o[[type]])
+            ref <- expected[[1]][expected[[3]] == if(type=="RNA") "Gene Expression" else "Peaks"]
+            cat("TYPE=",type," ACTUAL=",length(actual)," EXPECTED=",length(ref)," EXACT=",identical(actual,ref)," SET=",setequal(actual,ref),"\n",sep="")
+            cat("FIRST_ACTUAL=",paste(head(actual,5),collapse="|"),"\n",sep="")
+            cat("FIRST_EXPECTED=",paste(head(ref,5),collapse="|"),"\n",sep="")
+            if(length(actual)==length(ref)) {
+              idx <- which(actual != ref)
+              cat("MISMATCH_COUNT=",length(idx),"\n",sep="")
+              if(length(idx)) for(j in head(idx,5))cat("MISMATCH_IDX=",j," A=",actual[j]," E=",ref[j],"\n",sep="")
+            }
+          }
+          cat("RDS_FEATURE_DIAG_COMPLETE\n")
+          RS
+          fi
           echo "=== RESOURCE ==="
           df -h /home/h3039
           ps -u h3039 -o pid,etime,pcpu,rss,comm | grep -E 'Rscript|cellranger-arc|rclone|pigz|samtools|bash' | tail -n 18 || true
