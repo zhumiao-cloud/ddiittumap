@@ -1,0 +1,60 @@
+name: SXY ARC recovery progress audit 20261013
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/sxy-arc-recovery-progress-20261013.yml']
+permissions:
+  contents: read
+jobs:
+  status:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - name: Check RDS validation and persisted ARC service without modifying files
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "${SXY_PSWD:-}" || exit 9
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=25 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          echo "OBSERVED=$(date -Is)"
+          echo "=== SERVICE ==="
+          systemctl --user show sxy-mmul10-multiome-recovery-20261013.service -p ActiveState -p SubState -p Result -p MainPID -p ExecMainStatus
+          echo "=== LAST_MILESTONES ==="
+          journalctl --user -u sxy-mmul10-multiome-recovery-20261013.service -n 32 --no-pager --output=cat | cut -c1-240
+          echo "=== FILE_STATE ==="
+          D=/home/h3039/PROJECTS/zhumiao/multiome_arc_work
+          for sample in P10MK1_1 P10MK2 P20MK3; do
+            echo "SAMPLE=$sample"
+            p="$D/$sample"
+            if test -d "$p"; then
+              du -sh "$p"
+              for f in "$p/${sample}_seurat_multiome.rds" "$p/.postarc_rds_validated" "$p/.fully_verified"; do
+                if test -s "$f"; then stat -c '%n BYTES=%s' "$f"; fi
+              done
+            else
+              echo LOCAL_STAGE_ABSENT
+            fi
+            if timeout 35 rclone lsf "danxibao3_webdav:整理转换文件/$sample" --files-only --max-depth 1 2>/dev/null | grep -Fxq '.fully_verified'; then
+              echo REMOTE_VERIFIED_YES
+            else
+              echo REMOTE_VERIFIED_NO
+            fi
+          done
+          echo "=== RESOURCE ==="
+          df -h /home/h3039
+          ps -u h3039 -o pid,etime,pcpu,rss,comm | grep -E 'Rscript|cellranger-arc|rclone|pigz|samtools|bash' | tail -n 18 || true
+          echo RECOVERY_PROGRESS_AUDIT_COMPLETE
+          REMOTE
+          unset SSHPASS SXY_PSWD
