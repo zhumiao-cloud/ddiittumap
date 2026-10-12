@@ -41,7 +41,7 @@ jobs:
             test -d "$R/$sample"
             for modality in GEX ATAC; do
               echo "SOURCE_SIZE=$sample/$modality"
-              timeout 90 rclone lsf "danxibao3_webdav:$sample/$modality" --files-only --recursive --format sp --separator '|' | awk -F '|' '{ n++; if($2 ~ /^[0-9]+$/) bytes+=$2; if(n<=3) print "FILE_NAME=" $1 " BYTES=" $2 } END{printf "FILE_COUNT=%d BYTES=%.0f\n",n,bytes}'
+              timeout 90 rclone lsf "danxibao3_webdav:$sample/$modality" --files-only --recursive --format sp --separator '|' | awk -F '|' '{ n++; if($1 ~ /^[0-9]+$/) bytes+=$1; if(n<=3) print "BYTES=" $1 " FILE_NAME=" $2 } END{printf "FILE_COUNT=%d BYTES=%.0f\n",n,bytes}'
             done
           done
           echo "SOFTWARE"
