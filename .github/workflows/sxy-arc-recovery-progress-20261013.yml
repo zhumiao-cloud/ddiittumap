@@ -30,9 +30,9 @@ jobs:
           set +x
           echo "OBSERVED=$(date -Is)"
           echo "=== SERVICE ==="
-          systemctl --user show sxy-mmul10-multiome-recovery-v3-20261013.service -p ActiveState -p SubState -p Result -p MainPID -p ExecMainStatus
+          systemctl --user show sxy-mmul10-multiome-recovery-v4-20261013.service -p ActiveState -p SubState -p Result -p MainPID -p ExecMainStatus
           echo "=== LAST_MILESTONES ==="
-          journalctl --user -u sxy-mmul10-multiome-recovery-v3-20261013.service -n 32 --no-pager --output=cat | cut -c1-240
+          journalctl --user -u sxy-mmul10-multiome-recovery-v4-20261013.service -n 32 --no-pager --output=cat | cut -c1-240
           echo "=== FILE_STATE ==="
           D=/home/h3039/PROJECTS/zhumiao/multiome_arc_work
           for sample in P10MK1_1 P10MK2 P20MK3; do
