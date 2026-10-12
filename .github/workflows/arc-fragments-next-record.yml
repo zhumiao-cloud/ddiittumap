@@ -1,0 +1,45 @@
+name: ARC fragment record delimiter audit
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/arc-fragments-next-record.yml']
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - name: Read fragment header and first non-comment record
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "${SXY_PSWD:-}"
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get -qq update
+          sudo apt-get -qq -y install sshpass >/dev/null
+          mkdir -p -m 700 ~/.ssh
+          ssh-keyscan -p 20111 sxycloud1.top > ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes h3039@sxycloud1.top 'python3 -' <<'PY'
+          import gzip
+          file='/home/h3039/PROJECTS/zhumiao/multiome_arc_work/P10MK1_1/pipeline/P10MK1_1/outs/atac_fragments.tsv.gz'
+          ncomment=0
+          with gzip.open(file,'rt') as f:
+              for n,line in enumerate(f,1):
+                  if line.startswith('#'):
+                      ncomment+=1
+                      continue
+                  print('HEADER_LINES=',ncomment,'FIRST_RECORD=',n,'TAB_COLUMNS=',len(line.rstrip().split(chr(9))))
+                  print('FIRST_RECORD_SAMPLE=',repr(line[:130]))
+                  for j in range(5):
+                      line=f.readline()
+                      print('NEXT_RECORD_COLS=',len(line.rstrip().split(chr(9))), 'SAMPLE=',repr(line[:100]))
+                  break
+                  if n>20000: break
+          PY
+          unset SSHPASS SXY_PSWD
