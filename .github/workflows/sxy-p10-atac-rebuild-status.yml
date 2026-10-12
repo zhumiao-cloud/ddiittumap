@@ -1,4 +1,4 @@
-name: SXY P10 ATAC rebuild status
+name: SXY remaining manifests
 on:
   push:
     paths:
@@ -6,13 +6,13 @@ on:
 permissions:
   contents: read
 jobs:
-  status:
+  inspect:
     runs-on: ubuntu-latest
     timeout-minutes: 4
     env:
       SXY_PSWD: ${{ secrets.SXY_PSWD }}
     steps:
-      - name: Read rebuild state only
+      - name: Read mounted checksum manifests
         shell: bash
         run: |
           set -euo pipefail
@@ -27,15 +27,15 @@ jobs:
           export SSHPASS="$SXY_PSWD"
           sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
           set -u
-          unit=sxy-p10-atac-rebuild-20261012.service
-          echo "NOW=$(date -Is)"
-          systemctl --user show "$unit" -p ActiveState -p SubState -p Result -p NRestarts -p MainPID --no-pager 2>/dev/null || true
-          echo JOURNAL
-          journalctl --user -u "$unit" --no-pager --output=cat -n 60 2>/dev/null | tail -n 60 || true
-          echo CHUNKS
-          find "$HOME/PROJECTS/zhumiao/multiome_arc_work/P10MK1_1/.atac_rebuild" -type f -name 'chunk.*' -printf '%s\n' 2>/dev/null | awk '{n++;s+=$1} END{printf "count=%d bytes=%d gib=%.3f\n",n+0,s+0,s/1073741824}'
-          echo PROCESSES
-          ps -u h3039 -o pid,etime,%cpu,%mem,comm,args --sort=-%cpu | grep -E '[r]clone cat danxibao3_webdav:P10MK1_1/ATAC|[s]xy_p10_atac_verified_rebuild|[m]d5sum|[g]zip -t' | head -n 40 || true
-          df -hT "$HOME" | tail -n 1
+          root="$HOME/PROJECTS/zhumiao/danxibao3"
+          for s in P10MK2 P20MK3; do
+            for lib in GEX ATAC; do
+              echo "SECTION=$s/$lib"
+              find "$root/$s/$lib" -maxdepth 1 -type f \( -iname '*md5*' -o -iname 'readme*' \) -printf '%f\n' 2>/dev/null | head -n 20 || true
+              if [ -f "$root/$s/$lib/md5.md5" ]; then
+                grep -E '^[0-9a-fA-F]{32}[[:space:]]+' "$root/$s/$lib/md5.md5" | head -n 100 || true
+              fi
+            done
+          done
           REMOTE
           unset SSHPASS SXY_PSWD
