@@ -1,4 +1,4 @@
-name: Ephemeral multiome ARC status audit
+name: Ephemeral ARC safe resume preparation
 on:
   push:
     branches: [main]
@@ -7,19 +7,19 @@ on:
 permissions:
   contents: read
 jobs:
-  audit:
+  prepare:
     if: github.repository == 'zhumiao-cloud/ddiittumap'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       SXY_PSWD: ${{ secrets.SXY_PSWD }}
     steps:
-      - name: Read current sample artifacts and constrained resource status
+      - name: Pin safe scratch guard and register one-shot guarded continuation
         shell: bash
         run: |
           set -euo pipefail
           set +x
-          test -n "${SXY_PSWD:-}" || { echo 'MISSING_SECRET'; exit 21; }
+          test -n "${SXY_PSWD:-}" || exit 21
           echo "::add-mask::$SXY_PSWD"
           sudo apt-get update -qq
           sudo apt-get install -y -qq sshpass >/dev/null
@@ -30,41 +30,85 @@ jobs:
           sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 -o ServerAliveInterval=20 -o ServerAliveCountMax=5 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
           set -euo pipefail
           set +x
+          umask 077
+          BASE=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner
+          SCRIPT="$BASE/arc_multiome_three_samples.sh"
+          test -s "$SCRIPT"
+          python3 - "$SCRIPT" <<'PY'
+          import os,sys,pathlib,shutil,tempfile,datetime
+          path=pathlib.Path(sys.argv[1])
+          raw=path.read_text()
+          if raw.count('838860800')==1 and raw.count('800 GiB')==1:
+              new=raw.replace('838860800','471859200').replace('800 GiB','450 GiB')
+              backup=path.with_name(path.name+'.pre_450GiB_20261013.bak')
+              if not backup.exists(): shutil.copy2(path,backup)
+              fd,tmp=tempfile.mkstemp(prefix='.arc_guard.',dir=str(path.parent))
+              try:
+                  with os.fdopen(fd,'w') as f: f.write(new)
+                  os.chmod(tmp,path.stat().st_mode & 0o777)
+                  os.replace(tmp,path)
+              finally:
+                  if os.path.exists(tmp): os.unlink(tmp)
+              print('SCRATCH_GUARD_PATCHED=YES')
+          elif '471859200' in raw and '450 GiB' in raw:
+              print('SCRATCH_GUARD_ALREADY_SAFE=YES')
+          else:
+              raise SystemExit('UNRECOGNIZED_SCRIPT: refusing changes')
+          PY
+          bash -n "$SCRIPT"
+          test "$(grep -c '471859200' "$SCRIPT")" -eq 1
+          test -s "$BASE/arc_validate_seurat.R"
+          cat > "$BASE/resume_after_p10_20261013.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          set +x
+          umask 077
           ROOT=/home/h3039/PROJECTS/zhumiao/multiome_arc_work
-          echo "AUDIT_TIME=$(date -Is)"
-          echo "=== DISK ==="
-          df -h /home/h3039 | tail -1
-          echo "=== CORE_UNITS ==="
-          for u in sxy-mmul10-multiome-arc-20261010.service sxy-p10-atac-rebuild-20261012.service; do
-            echo "UNIT=$u"
-            systemctl --user show "$u" -p ActiveState -p SubState -p Result -p ExecMainStatus -p MainPID --no-pager 2>/dev/null || true
+          BASE=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner
+          UNIT=sxy-mmul10-multiome-arc-20261010.service
+          REF=/home/h3039/reference/Mmul_10_Ensembl113_ARC220
+          REMOTE=danxibao3_webdav:
+          echo "SAFE_RESUMER_STARTED=$(date -Is)"
+          while systemctl --user is-active --quiet "$UNIT"; do
+            sleep 90
           done
-          echo "=== SAMPLE_OUTPUTS ==="
-          for s in P10MK1_1 P10MK2 P20MK3; do
-            echo "SAMPLE=$s"
-            d="$ROOT/$s"
-            o="$d/pipeline/$s/outs"
-            test -d "$d" && { du -sh "$d" 2>/dev/null || true; } || echo LOCAL_STAGE_ABSENT
-            for f in               filtered_feature_bc_matrix/matrix.mtx.gz               filtered_feature_bc_matrix/features.tsv.gz               filtered_feature_bc_matrix/barcodes.tsv.gz               raw_feature_bc_matrix/matrix.mtx.gz               gex_possorted_bam.bam gex_possorted_bam.bam.bai               atac_possorted_bam.bam atac_possorted_bam.bam.bai               atac_fragments.tsv.gz atac_fragments.tsv.gz.tbi               filtered_feature_bc_matrix.h5 raw_feature_bc_matrix.h5; do
-              if [ -s "$o/$f" ]; then stat -c "$f|%s" "$o/$f"; else echo "$f|ABSENT"; fi
-            done
-            test -s "$d/${s}_seurat_multiome.rds" && echo RDS_LOCAL_PRESENT || echo RDS_LOCAL_ABSENT
-            if [ -s "$d/cellranger_arc_console.log" ]; then
-              echo CONSOLE_TAIL_BEGIN
-              tail -n 12 "$d/cellranger_arc_console.log" | cut -c1-220
-              echo CONSOLE_TAIL_END
-            fi
-            echo "SERVER_ARCHIVE_MARKER=$([ -f "$d/.fully_verified" ] && echo PRESENT || echo ABSENT)"
-            if timeout 15 rclone lsf "danxibao3_webdav:整理转换文件/$s" --files-only --max-depth 1 2>/dev/null | grep -Fxq '.fully_verified'; then
-              echo REMOTE_FULLY_VERIFIED=YES
-            else
-              echo REMOTE_FULLY_VERIFIED=NO
-            fi
-          done
-          echo "=== ARC PROCESS ==="
-          ps -u h3039 -o pid,etime,pcpu,rss,args | grep -E '[c]ellranger-arc count|[c]r_lib|[s]xy_multiome_fast_stage' | head -n 15 | cut -c1-230 || true
-          echo "=== PIPELINE JOURNAL TAIL ==="
-          journalctl --user -u sxy-mmul10-multiome-arc-20261010.service -n 16 --no-pager --output=cat 2>/dev/null | cut -c1-230 || true
-          echo AUDIT_COMPLETE
+          echo "PREVIOUS_UNIT_ENDED=$(date -Is)"
+          test -s "$REF/reference.json"
+          test -s "$BASE/arc_validate_seurat.R"
+          bash -n "$BASE/arc_multiome_three_samples.sh"
+          # This marker is written only after complete outs/BAM/RDS upload and download validation.
+          if ! timeout 80 rclone lsf "${REMOTE}整理转换文件/P10MK1_1" --files-only --max-depth 1 | grep -Fxq '.fully_verified'; then
+            echo 'STOP: P10MK1_1 has no completed output verification marker'
+            exit 44
+          fi
+          # A verified source sample must have released its own temporary input and pipestance.
+          if [ -e "$ROOT/P10MK1_1" ]; then
+            echo 'STOP: P10MK1_1 temp still exists; do not launch simultaneous conversion'
+            exit 45
+          fi
+          if ps -u h3039 -o args= | grep -Eq '[c]ellranger-arc count'; then
+            echo 'STOP: another ARC count process is active'
+            exit 46
+          fi
+          export ARC_REFERENCE="$REF"
+          export ARC_REFERENCE_SPECIES_VERIFIED=YES
+          echo 'SAFE_RESUME_OF_REMAINING_SAMPLES=START'
+          exec /usr/bin/bash "$BASE/arc_multiome_three_samples.sh"
+          SH
+          chmod 700 "$BASE/resume_after_p10_20261013.sh"
+          bash -n "$BASE/resume_after_p10_20261013.sh"
+          WATCH=sxy-multiome-arc-guarded-resume-20261013
+          CURRENT=$(systemctl --user show "$WATCH" -p LoadState --value 2>/dev/null || :)
+          if [ "$CURRENT" = loaded ]; then
+            echo 'GUARDED_RESUMER_ALREADY_REGISTERED'
+            systemctl --user show "$WATCH" -p ActiveState -p SubState -p Result --no-pager
+          else
+            systemd-run --user --unit="$WATCH" --description="Resume verified remaining Multiome ARC samples without overlap" /usr/bin/bash "$BASE/resume_after_p10_20261013.sh"
+            echo GUARDED_RESUMER_REGISTERED
+          fi
+          echo '=== CONFIRM ==='
+          systemctl --user show sxy-mmul10-multiome-arc-20261010 -p ActiveState -p MainPID --no-pager
+          systemctl --user show "$WATCH" -p ActiveState -p SubState -p MainPID --no-pager
+          echo GUARDED_PREPARATION_PASS
           REMOTE
           unset SSHPASS SXY_PSWD
