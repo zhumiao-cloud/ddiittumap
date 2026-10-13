@@ -1,0 +1,115 @@
+name: Temporary scoped ARC direct-route recovery
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - '.github/workflows/sxy-arc-direct-resume-20261013.yml'
+permissions:
+  contents: read
+jobs:
+  recover:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'temporary-sxy-arc-direct-resume-20261013'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
+    steps:
+      - name: Repair the validated local proxy only and inspect ARC download restart
+        env:
+          SXY_PSWD: ${{ secrets.SXY_PSWD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          test -n "${SXY_PSWD:-}" || { echo 'SXY_SECRET_MISSING'; exit 11; }
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq >/dev/null
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=25 -o ServerAliveInterval=20 -o ServerAliveCountMax=8 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          umask 077
+          UNIT=sxy-mmul10-multiome-local-two-v3-20261013.service
+          BASE=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner
+          WORK=/home/h3039/PROJECTS/zhumiao/multiome_arc_work
+          test "$(id -un)" = h3039
+          test -d "$BASE" && test -d "$WORK"
+          echo "REMOTE_NOW=$(date -Is)"
+          echo "SERVICE_BEFORE=$(systemctl --user show "$UNIT" -p ActiveState --value)"
+          probe() {
+            label="$1"; path="$2"
+            if timeout 90 env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY -u all_proxy rclone cat "$path" --count 65536 >/dev/null 2>/dev/null; then
+              echo "${label}=DIRECT_64K_OK"
+            else
+              echo "${label}=DIRECT_64K_FAILED"
+              return 30
+            fi
+          }
+          probe GEX_R1 danxibao3_webdav:P10MK2/GEX/2-GEX_S1_L001_R1_001.fastq.gz
+          probe GEX_R2 danxibao3_webdav:P10MK2/GEX/2-GEX_S1_L001_R2_001.fastq.gz
+          probe ATAC_R1 danxibao3_webdav:P10MK2/ATAC/2-ATAC_S1_L001_R1_001.fastq.gz
+          if test "$(systemctl --user show "$UNIT" -p ActiveState --value)" = active; then
+            echo ARC_UNIT_ALREADY_ACTIVE_NO_RESTART
+          else
+            python3 - <<'PY'
+          import os,pathlib,stat,subprocess,tempfile,shutil
+          unit='sxy-mmul10-multiome-local-two-v3-20261013.service'
+          base=pathlib.Path('/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner')
+          cmd=subprocess.check_output(['systemctl','--user','show',unit,'--property=ExecStart','--value'],text=True)
+          matches=[p for p in base.glob('*.sh') if str(p) in cmd and p.is_file() and not p.is_symlink()]
+          if len(matches)!=1:
+              raise SystemExit('AMBIGUOUS_SERVICE_SCRIPT_COUNT='+str(len(matches)))
+          p=matches[0]; st=p.stat()
+          if st.st_uid!=os.getuid() or st.st_nlink!=1:
+              raise SystemExit('UNSAFE_SCRIPT_OWNER_OR_HARDLINK')
+          old='export HTTPS_PROXY=http://127.0.0.1:19324\nexport https_proxy="$HTTPS_PROXY"'
+          new='# 123pan CDN direct read verified 2026-10-13; isolate from broken local proxy.\nunset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy'
+          raw=p.read_text()
+          if new in raw and old not in raw:
+              print('SCRIPT_ALREADY_REPAIRED')
+          elif raw.count(old)==1 and 'NO_WEBDAV_WRITES_NO_AUTO_CLEANUP=YES' in raw and 'P10MK2 P20MK3' in raw:
+              backup=p.with_name(p.name+'.pre_proxy_fix_20261013')
+              if not backup.exists():
+                  shutil.copy2(p,backup,follow_symlinks=False)
+                  os.chmod(backup,0o600)
+              fd,tmp=tempfile.mkstemp(prefix='.arc-proxy-fix-',dir=str(base),text=True)
+              try:
+                  os.fchmod(fd,stat.S_IMODE(st.st_mode))
+                  with os.fdopen(fd,'w') as fh:
+                      fh.write(raw.replace(old,new));fh.flush();os.fsync(fh.fileno())
+                  os.replace(tmp,p)
+              finally:
+                  if os.path.exists(tmp):os.unlink(tmp)
+              print('PROXY_REMOVED_BACKUP_SAVED')
+          else:
+              raise SystemExit('UNEXPECTED_SCRIPT_CONTENT_REFUSE_CHANGE')
+          subprocess.run(['bash','-n',str(p)],check=True)
+          print('SCRIPT_SYNTAX_PASS')
+          PY
+            systemctl --user reset-failed "$UNIT"
+            systemctl --user restart "$UNIT"
+            echo SERVICE_RESTART_ISSUED
+          fi
+          bytes() {
+            find "$WORK/P10MK2/input/GEX" -maxdepth 1 -type f -printf '%s\n' 2>/dev/null |
+              awk '{s+=$1}END{printf "%.0f\n",s}' 
+          }
+          initial="$(bytes)"
+          echo "GEX_BYTES_INITIAL=$initial"
+          systemctl --user show "$UNIT" -p ActiveState -p SubState -p MainPID -p Result -p ExecMainStatus
+          sleep 85
+          later="$(bytes)"
+          echo "GEX_BYTES_AFTER_85S=$later"
+          if (( later > initial )); then
+            echo GEX_BYTES_INCREASED=YES
+          else
+            echo GEX_BYTES_INCREASED=NO_OR_PREFLIGHT
+          fi
+          systemctl --user show "$UNIT" -p ActiveState -p SubState -p MainPID -p Result -p ExecMainStatus
+          echo "DISK_FREE_BYTES=$(df -B1 --output=avail "$WORK" | tail -1 | tr -d ' ')"
+          echo "REMOTE_CHECK_END=$(date -Is)"
+          REMOTE
+          unset SSHPASS SXY_PSWD
