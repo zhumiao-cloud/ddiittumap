@@ -1,0 +1,114 @@
+name: Temporary 1Panel three-app read-only triage
+on:
+  push:
+    paths:
+      - '.github/workflows/panel-app-start-triage-20261013.yml'
+permissions:
+  contents: read
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      PANEL_API_KEY: ${{ secrets.PANEL_API_KEY }}
+    steps:
+      - name: Inspect app installations and stopped containers without leaking configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          if [ -z "$PANEL_API_KEY" ]; then echo 'ERROR=PANEL_API_KEY_SECRET_MISSING'; exit 12; fi
+          echo "::add-mask::$PANEL_API_KEY"
+          umask 077
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          token_headers() {
+            TS="$(date +%s)"
+            TOKEN="$(printf '1panel%s%s' "$PANEL_API_KEY" "$TS" | md5sum | cut -d' ' -f1)"
+            echo "::add-mask::$TOKEN" >&2
+          }
+          panel_post() {
+            local endpoint="$1" payload="$2"
+            token_headers
+            curl -fsS --connect-timeout 12 --max-time 40 --retry 1 \
+              -H "1Panel-Token: $TOKEN" -H "1Panel-Timestamp: $TS" \
+              -H 'Content-Type: application/json' -H 'Accept: application/json' \
+              --data "$payload" "https://panel.evren.cn/api/v2/$endpoint"
+          }
+          panel_log() {
+            local name="$1" file="$2"
+            token_headers
+            curl -fsS --connect-timeout 12 --max-time 25 \
+              -H "1Panel-Token: $TOKEN" -H "1Panel-Timestamp: $TS" \
+              -H 'Accept: text/event-stream' \
+              --get --data-urlencode "container=$name" \
+              --data-urlencode 'since=all' --data-urlencode 'tail=180' \
+              --data-urlencode 'follow=false' --data-urlencode 'timestamp=false' \
+              'https://panel.evren.cn/api/v2/containers/search/log' > "$file" || true
+          }
+          echo 'STAGE=READ_ONLY_DIAGNOSTICS'
+          panel_post apps/installed/search '{"page":1,"pageSize":500,"name":"","tags":[],"update":false,"unused":false,"all":true,"sync":false,"checkUpdate":false}' > "$work/apps.json"
+          panel_post containers/search '{"page":1,"pageSize":500,"name":"","state":"all","filters":"","orderBy":"createdAt","order":"null"}' > "$work/containers.json"
+          python3 - "$work/apps.json" "$work/containers.json" <<'PY'
+          import sys,json,re
+          def load(p):
+              with open(p) as f:return json.load(f)
+          def which(s):
+              s=str(s).lower()
+              return next((x for x in ['halo','n8n','stalwart'] if x in s),'')
+          patterns={'disk_full':r'no space left|disk full','port_conflict':r'address already in use|port is already allocated',
+            'permission_denied':r'permission denied|operation not permitted','oom':r'out of memory|oomkilled|oom killed|exit code 137',
+            'database_error':r'database.*(error|fail|refused)|connection refused|sql.*error','missing_file':r'no such file|not found',
+            'invalid_config':r'invalid config|parse error|configuration error','mount_failure':r'mount.*(fail|error|denied)',
+            'image_pull':r'pull access denied|manifest unknown|failed to pull','network_error':r'network.*(fail|error|unreachable)|timeout'}
+          def hint(s):return [k for k,p in patterns.items() if re.search(p,str(s),re.I)]
+          apps=load(sys.argv[1]); ct=load(sys.argv[2])
+          print('APPS_API_CODE=',apps.get('code'),'CONTAINERS_API_CODE=',ct.get('code'))
+          if apps.get('code') not in (200,0):print('APPS_API_HINTS=',hint(apps.get('message','')))
+          if ct.get('code') not in (200,0):print('CONTAINERS_API_HINTS=',hint(ct.get('message','')))
+          for a in ((apps.get('data') or {}).get('items') or []):
+              target=which(' '.join(str(a.get(k,'')) for k in ('name','appKey','appName')))
+              if target:print('APP',json.dumps({'target':target,'install_id':a.get('id'),'status':a.get('status'),'app_status':a.get('appStatus'),'app_key':a.get('appKey'),'hints':hint(a.get('message',''))},ensure_ascii=False))
+          for c in ((ct.get('data') or {}).get('items') or []):
+              target=which(c.get('name',''))
+              if target:print('CONTAINER',json.dumps({'target':target,'name':c.get('name'),'state':c.get('state'),'status':c.get('status'),'hints':hint(c.get('message',''))},ensure_ascii=False))
+          PY
+          jq -r '.data.items[]? | select((.name // "" | ascii_downcase | test("halo|n8n|stalwart"))) | [.name,.containerID] | @tsv' "$work/containers.json" | while IFS="$(printf '\t')" read -r name id; do
+            [ -n "$id" ] || continue
+            panel_post containers/inspect "$(jq -nc --arg id "$id" '{id:$id,type:"container",detail:""}')" > "$work/inspect.json"
+            python3 - "$work/inspect.json" "$name" <<'PY'
+          import json,sys,re
+          j=json.load(open(sys.argv[1])); d=j.get('data') or {}
+          if isinstance(d,str):
+              try:d=json.loads(d)
+              except:d={}
+          s=d.get('State') or {}
+          err=str(s.get('Error') or '')
+          def hints(t):
+              signals={'permission_denied':r'permission denied','port_conflict':r'address already in use|port is already allocated',
+              'disk_full':r'no space left','missing_file':r'no such file|not found','oom':r'out of memory|oom'}
+              return [k for k,p in signals.items() if re.search(p,t,re.I)]
+          print('INSPECT',json.dumps({'name':sys.argv[2],'code':j.get('code'),'state':s.get('Status'),'exit_code':s.get('ExitCode'),'oom_killed':s.get('OOMKilled'),'restart_count':d.get('RestartCount'),'error_hints':hints(err),'finished_at':s.get('FinishedAt')}))
+          PY
+            panel_log "$name" "$work/log.txt"
+            python3 - "$work/log.txt" "$name" <<'PY'
+          import sys,re,json,collections
+          t=open(sys.argv[1],errors='replace').read()
+          patterns={'disk_full':r'no space left on device|disk full|ENOSPC',
+          'port_conflict':r'address already in use|port is already allocated|EADDRINUSE',
+          'permission_denied':r'permission denied|operation not permitted|EACCES',
+          'oom':r'out of memory|oomkilled|out-of-memory|memory allocation',
+          'database_error':r'database.*(error|fail|refused)|connection refused|unable to open database|sql.*error',
+          'missing_file':r'no such file|file not found|ENOENT',
+          'invalid_config':r'invalid config|parse error|configuration error|invalid value|unexpected token',
+          'mount_failure':r'mount.*(fail|error|denied)|volume.*(fail|error)',
+          'image_pull':r'pull access denied|manifest unknown|failed to pull',
+          'network_error':r'network.*(fail|error|unreachable)|timeout|timed out|name resolution',
+          'tls_error':r'certificate.*(error|invalid|expire)|tls.*error',
+          'crash':r'fatal|panic|unhandled exception|segmentation fault|exited with code',
+          'auth_error':r'unauthorized|authentication failed|invalid credentials'}
+          counts={k:len(re.findall(v,t,re.I)) for k,v in patterns.items()}
+          print('LOG_SIGNALS',json.dumps({'name':sys.argv[2],'bytes':len(t),'signals':{k:v for k,v in counts.items() if v}},ensure_ascii=False))
+          PY
+          done
+          echo 'TRIAGE_COMPLETE=true'
