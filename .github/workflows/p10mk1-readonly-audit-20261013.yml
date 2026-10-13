@@ -1,0 +1,69 @@
+name: P10MK1 read only FASTQ ARC audit
+on:
+  push:
+    paths:
+      - .github/workflows/p10mk1-readonly-audit-20261013.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Inspect existing local input and ARC records without modification
+        shell: bash
+        env:
+          SXY_PSWD: ${{ secrets.SXY_PSWD }}
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          test -n "${SXY_PSWD:-}" || exit 11
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, json, subprocess, re
+          root=Path('/home/h3039/PROJECTS/zhumiao/multiome_arc_work')
+          p=root/'P10MK1_1'
+          print('AUDIT_LOCAL_INPUT_BEGIN',flush=True)
+          for m in ('GEX','ATAC'):
+              d=p/'input'/m
+              entries=[]
+              for x in sorted(d.iterdir(),key=lambda z:z.name) if d.is_dir() else []:
+                  st=x.lstat()
+                  entries.append({'name':x.name,'bytes':st.st_size,'regular':x.is_file(),'symlink':x.is_symlink(),'kind':'directory' if x.is_dir() else 'file'})
+              print('LOCAL_'+m+'='+json.dumps(entries,ensure_ascii=False),flush=True)
+          print('LIBRARIES_CSV='+((p/'libraries.csv').read_text() if (p/'libraries.csv').is_file() else 'MISSING'),flush=True)
+          for f in ('cellranger_arc_console.log','arc_validate_seurat.log'):
+              x=p/f
+              s=x.read_text(errors='replace') if x.is_file() else ''
+              interesting=[line for line in s.splitlines() if any(w in line for w in ('Pipestance completed','PASS sample=','FASTQ','fastq','--libraries','Error','WARNING','WARNING:','ARC_COUNT'))]
+              print('LOG_'+f+'_BYTES='+str(x.stat().st_size if x.is_file() else -1)+' MATCHED_TAIL='+json.dumps(interesting[-25:],ensure_ascii=False),flush=True)
+          outs=p/'pipeline'/'P10MK1_1'/'outs'
+          required=['filtered_feature_bc_matrix/matrix.mtx.gz','filtered_feature_bc_matrix/features.tsv.gz','filtered_feature_bc_matrix/barcodes.tsv.gz','raw_feature_bc_matrix/matrix.mtx.gz','raw_feature_bc_matrix/features.tsv.gz','raw_feature_bc_matrix/barcodes.tsv.gz','filtered_feature_bc_matrix.h5','raw_feature_bc_matrix.h5','gex_possorted_bam.bam','gex_possorted_bam.bam.bai','atac_possorted_bam.bam','atac_possorted_bam.bam.bai','atac_fragments.tsv.gz','atac_fragments.tsv.gz.tbi','gex_molecule_info.h5','summary.csv','web_summary.html']
+          print('OFFICIAL='+json.dumps({n:(outs/n).stat().st_size if (outs/n).is_file() else None for n in required}),flush=True)
+          print('RDS_BYTES='+(str((p/'P10MK1_1_seurat_multiome.rds').stat().st_size) if (p/'P10MK1_1_seurat_multiome.rds').is_file() else 'MISSING'),flush=True)
+          for f in ('.postarc_rds_validated','.local_arc_verified'):
+              print('MARKER_'+f+'='+str((p/f).exists()),flush=True)
+          print('AUDIT_LOCAL_INPUT_END',flush=True)
+          PY
+          for m in GEX ATAC; do
+            echo "ORIGINAL_WEBDAV_LIST_BEGIN_$m"
+            timeout 110 rclone lsf "danxibao3_webdav:P10MK1_1/$m" --files-only --format sp --separator '|' | head -n 100 || echo SOURCE_LIST_UNAVAILABLE
+            echo "ORIGINAL_WEBDAV_LIST_END_$m"
+          done
+          df -h /home/h3039/PROJECTS/zhumiao/multiome_arc_work
+          systemctl --user show sxy-mmul10-multiome-local-two-v2-20261013.service -p ActiveState -p MainPID -p Result || true
+          echo READ_ONLY_AUDIT_COMPLETE
+          REMOTE
+          unset SSHPASS SXY_PSWD
