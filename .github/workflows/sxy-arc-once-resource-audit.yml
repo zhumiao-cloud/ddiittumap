@@ -1,0 +1,77 @@
+name: Temporary Multiome ARC resource and progress audit
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sxy-arc-once-resource-audit.yml'
+permissions:
+  contents: read
+concurrency:
+  group: one-time-sxy-arc-resource-audit
+  cancel-in-progress: false
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - name: Read-only ARC stage, resource and filesystem check
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          test -n "${SXY_PSWD:-}" || exit 41
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get -qq update
+          sudo apt-get -y -qq install sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          W=/home/h3039/PROJECTS/zhumiao/multiome_arc_work
+          U=sxy-mmul10-multiome-local-two-v3-20261013.service
+          echo "AUDIT_TIME=$(date -Is)"
+          echo '=== SERVICE AND CAPACITY ==='
+          systemctl --user show "$U" -p LoadState -p ActiveState -p SubState -p MainPID -p Result -p ExecMainStatus -p MemoryCurrent -p CPUUsageNSec
+          df -B1 --output=size,used,avail,pcent "$W" | tail -n 2
+          echo "CPU_ONLINE=$(getconf _NPROCESSORS_ONLN)"
+          echo "CPU_ALLOWED=$(grep -m1 Cpus_allowed_list /proc/self/status | awk '{print $2}')"
+          grep -E 'MemTotal:|MemAvailable:|SwapTotal:|SwapFree:' /proc/meminfo
+          echo '=== SAMPLES ==='
+          for S in P10MK1_1 P10MK2 P20MK3; do
+            D="$W/$S"
+            echo "SAMPLE=$S"
+            if test -d "$D"; then
+              for X in "$D/.fully_verified" "$D/.local_arc_verified" "$D/.postarc_rds_validated" "$D/${S}_seurat_multiome.rds" "$D/pipeline/$S/outs/filtered_feature_bc_matrix/matrix.mtx.gz" "$D/pipeline/$S/outs/gex_possorted_bam.bam" "$D/pipeline/$S/outs/atac_possorted_bam.bam" "$D/pipeline/$S/outs/atac_fragments.tsv.gz"; do
+                if test -s "$X"; then echo "PRESENT=$(basename "$X") SIZE=$(stat -c %s "$X")"; fi
+              done
+              if test -d "$D/input"; then du -sB1 "$D/input" | awk '{print "STAGED_INPUT_BYTES="$1}'; fi
+              if test -f "$D/cellranger_arc_console.log"; then
+                grep -E 'Pipestance completed|ARC|Using|chunk|Shutting down|Martian' "$D/cellranger_arc_console.log" | tail -n 8 | cut -c1-200 || true
+              fi
+            else echo SAMPLE_STAGE_ABSENT; fi
+          done
+          echo '=== RECENT_PIPELINE_LOG ==='
+          journalctl --user -u "$U" -n 85 --no-pager --output=cat 2>/dev/null | grep -E 'ARC_|CHUNK|MAKE_SHARD|ALIGN_ATAC|GEX|P10MK|P20MK|Pipestance|FASTQ|ERROR|Error|fail|shard|chunks|MRO|Running|finish|^2026' | tail -n 42 | cut -c1-240 || true
+          echo '=== PROCESS RESOURCE SNAPSHOT ==='
+          ps -u h3039 -o pid,ppid,psr,stat,etime,pcpu,pmem,nlwp,rss,comm --sort=-pcpu | head -n 22
+          echo '=== LOAD AND IOWAIT ==='
+          uptime
+          vmstat 1 4 | tail -n 4
+          echo '=== ARC TASK PROGRESS ==='
+          P="$W/P10MK2/pipeline/P10MK2"
+          if test -d "$P"; then
+            find "$P" -maxdepth 3 -type f \( -name '_log' -o -name '*_log' \) -printf '%p %s\n' 2>/dev/null | tail -n 8 | cut -c1-220 || true
+          fi
+          echo '=== RUNNER DEPLOYMENT CHECK ==='
+          F=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/arc_multiome_remaining_local_only_20261013.sh
+          stat -c 'RUNNER_SIZE=%s MODIFIED=%y' "$F"
+          if grep -Fq 'LOCAL_FASTQ_COPIES_RECLAIMED=' "$F"; then echo RUNNER_HAS_POSTVERIFY_FASTQ_RECLAIM=YES; else echo RUNNER_HAS_POSTVERIFY_FASTQ_RECLAIM=NO; fi
+          echo RESOURCE_AUDIT_COMPLETE
+          REMOTE
+          unset SSHPASS SXY_PSWD
