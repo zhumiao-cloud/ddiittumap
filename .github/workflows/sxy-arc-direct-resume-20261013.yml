@@ -1,4 +1,4 @@
-name: Temporary ARC unit registration diagnostic
+name: Temporary ARC user service restoration
 on:
   pull_request:
     types: [opened, synchronize]
@@ -7,12 +7,12 @@ on:
 permissions:
   contents: read
 jobs:
-  inspect:
+  restore:
     if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'temporary-sxy-arc-direct-resume-20261013'
     runs-on: ubuntu-24.04
-    timeout-minutes: 7
+    timeout-minutes: 12
     steps:
-      - name: Read-only diagnosis of ARC unit registration and repaired script
+      - name: Restore only missing ARC user unit then check real staging progress
         shell: bash
         env:
           SXY_PSWD: ${{ secrets.SXY_PSWD }}
@@ -28,31 +28,69 @@ jobs:
           ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
           chmod 600 "$HOME/.ssh/known_hosts"
           export SSHPASS="$SXY_PSWD"
-          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=25 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=25 -o ServerAliveInterval=20 -o ServerAliveCountMax=8 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
           set -euo pipefail
           set +x
+          umask 077
           UNIT=sxy-mmul10-multiome-local-two-v3-20261013.service
-          BASE=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner
+          RUNNER=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/arc_multiome_remaining_local_only_20261013.sh
           WORK=/home/h3039/PROJECTS/zhumiao/multiome_arc_work
-          echo "REMOTE_DATE=$(date -Is)"
-          echo 'SERVICE_PROPERTIES_START'
-          systemctl --user show "$UNIT" -p LoadState -p ActiveState -p SubState -p UnitFileState -p FragmentPath -p Result || true
-          echo SERVICE_PROPERTIES_END
-          echo 'UNIT_FILES_MATCH:'
-          find "$HOME/.config/systemd/user" /etc/systemd/user -maxdepth 2 -iname '*multiome*' -printf '%f %y\n' 2>/dev/null || :
-          echo 'SCRIPT_CANDIDATES:'
+          test "$(id -un)" = h3039
+          test -d "$WORK"
+          test ! -L "$RUNNER" && test -f "$RUNNER" && test -x "$RUNNER"
+          bash -n "$RUNNER"
           python3 - <<'PY'
-          from pathlib import Path
-          b=Path('/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner')
-          for f in b.glob('*.sh'):
-              if f.is_symlink() or not f.is_file(): continue
-              s=f.read_text(errors='replace')
-              if 'P10MK2 P20MK3' in s or 'NO_WEBDAV_WRITES_NO_AUTO_CLEANUP=YES' in s:
-                  print(f.name,'proxy_unset=', 'unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy' in s, 'marker=', 'NO_WEBDAV_WRITES_NO_AUTO_CLEANUP=YES' in s,'mode=', oct(f.stat().st_mode&0o777))
+          import os,pathlib,stat
+          p=pathlib.Path('/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/arc_multiome_remaining_local_only_20261013.sh')
+          s=p.stat()
+          raw=p.read_text()
+          required=['NO_WEBDAV_WRITES_NO_AUTO_CLEANUP=YES','P10MK2 P20MK3','unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy','/home/h3039/reference/Mmul_10_Ensembl113_ARC220','/home/h3039/PROJECTS/zhumiao/multiome_arc_work']
+          if s.st_uid!=os.getuid() or s.st_nlink!=1 or not all(x in raw for x in required) or 'export HTTPS_PROXY=http://127.0.0.1:19324' in raw:
+              raise SystemExit('RUNNER_SAFETY_GUARD_FAIL')
+          d=pathlib.Path.home()/'.config/systemd/user'
+          d.mkdir(parents=True,exist_ok=True,mode=0o700)
+          u=d/'sxy-mmul10-multiome-local-two-v3-20261013.service'
+          body='''[Unit]
+          Description=Multiome ARC 2.2.0 local-only P10MK2 then P20MK3
+          [Service]
+          Type=simple
+          WorkingDirectory=/home/h3039/PROJECTS/zhumiao
+          ExecStart=/usr/bin/bash -lc "exec /home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/arc_multiome_remaining_local_only_20261013.sh"
+          Restart=no
+          TimeoutStartSec=0
+          StandardOutput=journal
+          StandardError=journal
+          '''
+          if u.exists():
+              if u.is_symlink() or u.read_text()!=body:
+                  raise SystemExit('EXISTING_UNIT_DIFFERENT_REFUSE_OVERWRITE')
+              print('UNIT_ALREADY_WRITTEN')
+          else:
+              fd=os.open(str(u),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+              with os.fdopen(fd,'w') as f: f.write(body);f.flush();os.fsync(f.fileno())
+              print('MISSING_USER_UNIT_RESTORED')
           PY
-          echo 'PROCESS_CHECK:'
-          ps -u h3039 -o comm= 2>/dev/null | awk '/cellranger-arc|rclone|martian/{a[$1]++}END{for(k in a) print k,a[k]}'
-          echo "FREE_BYTES=$(df -B1 --output=avail "$WORK" | tail -1 | tr -d ' ')"
-          echo AUDIT_FINISHED
+          systemctl --user daemon-reload
+          echo "UNIT_LOAD=$(systemctl --user show "$UNIT" -p LoadState --value)"
+          test "$(systemctl --user show "$UNIT" -p LoadState --value)" = loaded
+          if test "$(systemctl --user show "$UNIT" -p ActiveState --value)" != active; then
+            systemctl --user start "$UNIT"
+          fi
+          echo 'ARC_SERVICE_START_CHECK:'
+          systemctl --user show "$UNIT" -p LoadState -p ActiveState -p SubState -p MainPID -p Result -p ExecMainStatus
+          bytes() {
+            find "$WORK/P10MK2/input/GEX" -maxdepth 1 -type f -printf '%s\n' 2>/dev/null |
+              awk '{s+=$1}END{printf "%.0f\n",s}'
+          }
+          initial="$(bytes)"
+          echo "GEX_BYTES_BEFORE=$initial"
+          sleep 95
+          later="$(bytes)"
+          echo "GEX_BYTES_AFTER_95S=$later"
+          if (( later > initial )); then echo 'GEX_BYTES_INCREASED=YES'; else echo 'GEX_BYTES_INCREASED=NO_OR_PREFLIGHT'; fi
+          echo 'ARC_SERVICE_POST_START:'
+          systemctl --user show "$UNIT" -p LoadState -p ActiveState -p SubState -p MainPID -p Result -p ExecMainStatus
+          echo "DISK_FREE_BYTES=$(df -B1 --output=avail "$WORK" | tail -1 | tr -d ' ')"
+          echo "AUDIT_FINISHED=$(date -Is)"
           REMOTE
           unset SSHPASS SXY_PSWD
