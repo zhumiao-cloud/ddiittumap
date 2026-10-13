@@ -1,0 +1,112 @@
+name: Temporary read-only ARC live health and capacity audit
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/sxy-arc-current-audit-20261014.yml']
+permissions:
+  contents: read
+concurrency:
+  group: sxy-arc-live-audit-once-20261014
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
+    env:
+      SXY_PSWD: ${{ secrets.SXY_PSWD }}
+    steps:
+      - name: Read-only sample checkpoints and real process usage
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          test -n "${SXY_PSWD:-}" || { echo AUTH_MISSING; exit 10; }
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq >/dev/null
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keyscan -p 20111 sxycloud1.top > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 -o ServerAliveInterval=20 -o ServerAliveCountMax=5 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          W=/home/h3039/PROJECTS/zhumiao/multiome_arc_work
+          B=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner
+          U=sxy-mmul10-multiome-local-two-v3-20261013.service
+          echo "AUDIT_TIME=$(date -Is)"
+          echo "CPU_ONLINE=$(getconf _NPROCESSORS_ONLN)"
+          echo '=== SERVICE ==='
+          systemctl --user show "$U" -p ActiveState -p SubState -p Result -p MainPID -p MemoryCurrent -p CPUUsageNSec -p ExecMainStatus -p CPUQuotaPerSecUSec
+          systemctl --user cat "$U" 2>/dev/null | head -n 28 || :
+          echo '=== DISK ==='
+          df -B1 --output=source,size,used,avail,pcent,target "$W" | tail -n 2
+          echo '=== SAMPLES ==='
+          for s in P10MK1_1 P10MK2 P20MK3; do
+            d="$W/$s"; o="$d/pipeline/$s/outs"
+            echo "SAMPLE=$s"
+            if test -d "$d"; then
+              du -sxh "$d" | awk '{print "TOTAL_LOCAL="$1}'
+              for p in "$d/.local_arc_verified" "$d/.postarc_rds_validated" "$d/${s}_seurat_multiome.rds" "$o/filtered_feature_bc_matrix/matrix.mtx.gz" "$o/gex_possorted_bam.bam" "$o/atac_possorted_bam.bam" "$o/atac_fragments.tsv.gz"; do
+                if test -s "$p"; then stat -c 'PRESENT=%n BYTES=%s' "$p"; else echo "MISSING=$p"; fi
+              done
+              for mode in GEX ATAC; do
+                if test -d "$d/input/$mode"; then
+                  echo "LOCAL_FASTQ_$mode=$(find "$d/input/$mode" -maxdepth 1 -type f -name '*.fastq.gz' | wc -l)"
+                  du -sxh "$d/input/$mode" | awk '{print "LOCAL_FASTQ_SIZE="$1}'
+                fi
+              done
+              if test -s "$d/cellranger_arc_console.log"; then
+                tail -n 4 "$d/cellranger_arc_console.log" | cut -c1-180
+              fi
+              if test -f "$d/pipeline/$s/_log"; then
+                grep -E 'ALIGN_ATAC_READS.*chunks running|Pipestance completed successfully|Fatal|ERROR' "$d/pipeline/$s/_log" | tail -n 7 | cut -c1-220 || :
+              fi
+            else echo STAGE_ABSENT; fi
+          done
+          echo '=== RUNNER ==='
+          if test -f "$B/arc_multiome_remaining_local_only_20261013.sh"; then
+            stat -c 'ACTIVE_RUNNER_BYTES=%s MTIME=%y' "$B/arc_multiome_remaining_local_only_20261013.sh"
+            if grep -q 'LOCAL_FASTQ_COPIES_RECLAIMED' "$B/arc_multiome_remaining_local_only_20261013.sh"; then echo RUNNER_HAS_FASTQ_CLEANUP=YES; else echo RUNNER_HAS_FASTQ_CLEANUP=NO; fi
+            sha256sum "$B/arc_multiome_remaining_local_only_20261013.sh"
+          fi
+          echo '=== COMPUTE ==='
+          uptime
+          cat /proc/loadavg
+          free -h | head -n 3
+          ps -u h3039 -o pid,ppid,stat,nlwp,pcpu,rss,etime,comm --sort=-pcpu | head -n 28
+          echo '=== LIVE_TASK_CPU_DELTA_12S ==='
+          python3 - <<'PY'
+          import os,time
+          def snap():
+              result={}
+              for p in os.listdir('/proc'):
+                  if not p.isdecimal():continue
+                  try:
+                      with open(f'/proc/{p}/stat') as fh:v=fh.read()
+                      a=v.rfind(')')+2
+                      fields=v[a:].split()
+                      name=v[v.find('(')+1:v.rfind(')')]
+                      if not name.startswith(('cr_atac','mrjob','STAR','cellranger','mrp')):continue
+                      ticks=int(fields[11])+int(fields[12])
+                      result[int(p)]=(name,ticks)
+                  except (OSError,ValueError,IndexError):pass
+              return result
+          start=snap();t=time.monotonic();time.sleep(12);elapsed=time.monotonic()-t;end=snap()
+          hz=os.sysconf('SC_CLK_TCK')
+          sums={};active={};count={}
+          for pid,(name,ticks) in end.items():
+              if pid in start and start[pid][0]==name:
+                  delta=max(0,ticks-start[pid][1])/hz
+                  sums[name]=sums.get(name,0)+delta
+                  count[name]=count.get(name,0)+1
+                  if delta>0.2:active[name]=active.get(name,0)+1
+          for name in sorted(sums):
+              print('CPU_DELTA',name,'processes',count[name],'active',active.get(name,0),'cpu_seconds',round(sums[name],2),'avg_cores',round(sums[name]/elapsed,2),flush=True)
+          PY
+          echo '=== LAST_SERVICE_JOURNAL ==='
+          journalctl --user -u "$U" -n 16 --no-pager --output=cat 2>/dev/null | cut -c1-200 || :
+          echo AUDIT_FINISHED
+          REMOTE
+          unset SSHPASS SXY_PSWD
