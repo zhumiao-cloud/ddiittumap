@@ -111,4 +111,43 @@ jobs:
           print('LOG_SIGNALS',json.dumps({'name':sys.argv[2],'bytes':len(t),'signals':{k:v for k,v in counts.items() if v}},ensure_ascii=False))
           PY
           done
+          panel_get() {
+            local endpoint="$1"
+            token_headers
+            curl -fsS --connect-timeout 12 --max-time 35 \
+              -H "1Panel-Token: $TOKEN" -H "1Panel-Timestamp: $TS" \
+              -H 'Accept: application/json' "https://panel.evren.cn/api/v2/$endpoint"
+          }
+          panel_get containers/docker/status > "$work/docker.json"
+          python3 - "$work/docker.json" "$work/containers.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); c=json.load(open(sys.argv[2]))
+          s=d.get('data') or {}
+          print('DOCKER_STATUS',json.dumps({'code':d.get('code'),'isActive':s.get('isActive'),'isExist':s.get('isExist')}))
+          k=(c.get('data') or {})
+          print('CONTAINER_INVENTORY',json.dumps({'total':k.get('total'),'returned':len(k.get('items') or []),'state_counts':{st:sum(x.get('state')==st for x in (k.get('items') or [])) for st in set(x.get('state') for x in (k.get('items') or []))}}))
+          PY
+          for id in 21 25 26; do
+            panel_get "apps/installed/info/$id" > "$work/info.json"
+            python3 - "$work/info.json" "$id" <<'PY'
+          import json,sys,re
+          j=json.load(open(sys.argv[1])); d=j.get('data') or {}
+          err=str(d.get('message') or '')
+          hints={'missing_compose':r'no such file|not found','permission_denied':r'permission denied','docker_unavailable':r'docker.*(unavail|fail|not running|connect)',
+          'timeout':r'timed? ?out|timeout','port_conflict':r'address already in use','disk_full':r'no space left','image_error':r'pull|manifest|image.*not found'}
+          print('APP_INFO',json.dumps({'id':sys.argv[2],'code':j.get('code'),'name':d.get('name'),'status':d.get('status'),'container':d.get('container'),'message_length':len(err),'error_hints':[k for k,v in hints.items() if re.search(v,err,re.I)]}))
+          PY
+          done
+          panel_post logs/tasks/search '{"page":1,"pageSize":100,"type":"","status":"","taskID":""}' > "$work/tasks.json" || true
+          python3 - "$work/tasks.json" <<'PY'
+          import json,sys,re
+          try:j=json.load(open(sys.argv[1]))
+          except:print('TASK_QUERY=unavailable');raise SystemExit
+          a=((j.get('data') or {}).get('items') or [])
+          for x in a:
+              n=str(x.get('name') or '').lower()
+              if any(k in n for k in ['halo','n8n','stalwart']):
+                  err=str(x.get('errorMsg') or '')
+                  print('RECENT_TASK',json.dumps({'id':x.get('id'),'name':x.get('name'),'type':x.get('type'),'status':x.get('status'),'error_length':len(err),'error_words':[k for k in ['docker','compose','container','failed','permission','network','disk','image'] if k in err.lower()]}))
+          PY
           echo 'TRIAGE_COMPLETE=true'
