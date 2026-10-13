@@ -1,4 +1,4 @@
-name: Temporary Multiome ARC resource and progress audit
+name: Temporary Multiome ARC computational load deep audit
 on:
   push:
     branches: [main]
@@ -58,15 +58,25 @@ jobs:
           done
           echo '=== RECENT_PIPELINE_LOG ==='
           journalctl --user -u "$U" -n 85 --no-pager --output=cat 2>/dev/null | grep -E 'ARC_|CHUNK|MAKE_SHARD|ALIGN_ATAC|GEX|P10MK|P20MK|Pipestance|FASTQ|ERROR|Error|fail|shard|chunks|MRO|Running|finish|^2026' | tail -n 42 | cut -c1-240 || true
-          echo '=== PROCESS RESOURCE SNAPSHOT ==='
-          ps -u h3039 -o pid,ppid,psr,stat,etime,pcpu,pmem,nlwp,rss,comm --sort=-pcpu | head -n 22
+          echo '=== PROCESS CPU BY USER GROUP ==='
+          ps -eo user:20,comm:25,pcpu:7,nlwp:6,rss:12,stat:5 --no-headers | awk '$1=="h3039" {by[$2]++; cpu[$2]+=$3; threads[$2]+=$4;mem[$2]+=$5} END {for(k in by) printf "COMM=%s N=%s SUM_CPU_PCT=%.1f SUM_THREADS=%s SUM_RSS_KB=%.0f\n",k,by[k],cpu[k],threads[k],mem[k]}' | sort | tail -n 22
+          echo '=== KEY ALIGNMENT EXECUTABLE COUNTS ==='
+          ps -eo user:20,comm:40,stat:6 --no-headers | grep -E 'h3039.*(bwa|align|samtools|STAR|python|mrp|cellranger|cutadapt|pigz)' | sort | uniq -c | tail -n 35 || true
+          echo '=== CPU CGROUP AND QUOTA ==='
+          sed -n '1,7p' /proc/757565/cgroup 2>/dev/null || true
+          for v in /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.stat /sys/fs/cgroup/memory.current; do if test -f "$v"; then echo "$v"; head -n 8 "$v"; fi; done
           echo '=== LOAD AND IOWAIT ==='
           uptime
           vmstat 1 4 | tail -n 4
-          echo '=== ARC TASK PROGRESS ==='
+          echo '=== ATAC PIPESTANCE RELEVANT LOG ==='
           P="$W/P10MK2/pipeline/P10MK2"
+          if test -s "$P/_log"; then
+            grep -E 'ALIGN_ATAC_READS.*(chunks running|chunks_complete|run:local|joberror)' "$P/_log" | tail -n 22 | cut -c1-180
+          fi
+          echo '=== DISK OUTPUT AND CHUNK COUNTS ==='
           if test -d "$P"; then
-            find "$P" -maxdepth 3 -type f \( -name '_log' -o -name '*_log' \) -printf '%p %s\n' 2>/dev/null | tail -n 8 | cut -c1-220 || true
+            du -sB1 "$P" | awk '{print "ARC_PIPELINE_BYTES="$1}'
+            find "$P" -path '*ALIGN_ATAC_READS*' -name _complete -type f 2>/dev/null | wc -l | awk '{print "COMPLETED_MARKER_COUNT="$1}'
           fi
           echo '=== RUNNER DEPLOYMENT CHECK ==='
           F=/home/h3039/PROJECTS/zhumiao/.multiome_arc_runner/arc_multiome_remaining_local_only_20261013.sh
