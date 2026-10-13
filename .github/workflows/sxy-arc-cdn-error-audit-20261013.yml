@@ -1,0 +1,49 @@
+name: SXY ARC sanitized WebDAV copy error audit
+on:
+  push:
+    paths:
+      - '.github/workflows/sxy-arc-cdn-error-audit-20261013.yml'
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Show redacted CDN transfer failures and local proxy availability
+        env:
+          SXY_PSWD: ${{ secrets.SXY_PSWD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "${SXY_PSWD:-}"
+          echo "::add-mask::$SXY_PSWD"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+          install -d -m 700 ~/.ssh
+          ssh-keyscan -p 20111 sxycloud1.top > ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+          export SSHPASS="$SXY_PSWD"
+          sshpass -e ssh -p 20111 -o StrictHostKeyChecking=yes -o ConnectTimeout=30 h3039@sxycloud1.top 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          set +x
+          UNIT=sxy-mmul10-multiome-local-two-v3-20261013.service
+          D=/home/h3039/PROJECTS/zhumiao/multiome_arc_work/P10MK2/input/GEX
+          echo "TIME=$(date -Is)"
+          systemctl --user show "$UNIT" -p ActiveState -p MainPID -p Result -p ExecMainStatus
+          echo '=== SANITIZED_JOURNAL_ERRORS ==='
+          journalctl --user -u "$UNIT" -n 36 --no-pager --output=cat |
+            sed -E 's@https?://[^" ]+@URL_REDACTED@g;s@([?&](token|sign|signature|auth|key|expire)=[^ &]+)@REDACTED@gI' |
+            tail -n 26 | cut -c1-280
+          echo '=== RCLONE_VERSION_AND_PROXY_PROCESS ==='
+          rclone version | head -2
+          if timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/19324' 2>/dev/null; then echo LOCAL_PROXY_PORT_19324_OPEN; else echo LOCAL_PROXY_PORT_19324_CLOSED; fi
+          echo '=== CLEANUP_ELIGIBLE_INPUT ==='
+          find "$D" -maxdepth 1 -type f -printf '%f|%s\n' | sort
+          du -sh "$D"
+          echo '=== SERVICE_LATEST_STATUS ==='
+          ps -u h3039 -o pid=,comm=,args= | grep -E '[r]clone copy danxibao3_webdav:P10MK2' | cut -c1-170 || true
+          echo 'SANITIZED_AUDIT_DONE'
+          REMOTE
+          unset SSHPASS SXY_PSWD
