@@ -1,0 +1,38 @@
+name: Temporary 1Panel read-only network metrics access audit
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary-cd-panel-metrics.yml'
+permissions:
+  contents: read
+jobs:
+  check:
+    if: github.repository == 'zhumiao-cloud/ddiittumap' && github.actor == 'zhumiao-cloud' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Verify official 1Panel API scheme without exposing credentials
+        shell: bash
+        env:
+          PANEL_KEY: ${{ secrets.PANEL_API_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "$PANEL_KEY"
+          echo "::add-mask::$PANEL_KEY"
+          python3 - <<'PY'
+          import os,time,hashlib,hmac,urllib.request,urllib.error,json
+          key=os.environ["PANEL_KEY"]
+          paths=[("GET","/api/v1/dashboard/base/os"),("POST","/api/v2/dashboard/current"),("GET","/api/v2/dashboard/current"),("POST","/api/v2/toolbox/device/base")]
+          for mode in ("md5","hmac_sha256"):
+           for method,path in paths:
+            ts=str(int(time.time()))
+            sig=hashlib.md5(("1panel"+key+ts).encode()).hexdigest() if mode=="md5" else hmac.new(key.encode(),("1panel:"+ts).encode(),"sha256").hexdigest()
+            req=urllib.request.Request("https://panel.evren.cn"+path,headers={"1Panel-Token":sig,"1Panel-Timestamp":ts,"Content-Type":"application/json"},method=method,data=(b"{}" if method=="POST" else None))
+            try:
+             with urllib.request.urlopen(req,timeout=9) as resp:
+              print("PANEL_API_PROBE",json.dumps({"method":method,"endpoint":path,"sign":mode,"status":resp.status}),flush=True)
+            except urllib.error.HTTPError as e:
+             print("PANEL_API_PROBE",json.dumps({"method":method,"endpoint":path,"sign":mode,"status":e.code}),flush=True)
+            except Exception as e:print("PANEL_API_PROBE_ERR",json.dumps({"method":method,"endpoint":path,"sign":mode,"type":type(e).__name__}),flush=True)
+          PY
