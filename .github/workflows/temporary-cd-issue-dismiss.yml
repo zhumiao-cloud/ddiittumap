@@ -1,0 +1,142 @@
+name: One-shot CloudDrive backup issue dismissal
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary-cd-issue-dismiss.yml'
+permissions:
+  contents: read
+jobs:
+  dismiss:
+    if: github.repository == 'zhumiao-cloud/ddiittumap' && github.actor == 'zhumiao-cloud' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Dismiss only CloudDrive backup sync issues
+        shell: bash
+        env:
+          CD_TOKEN: ${{ secrets.CD_API_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "$CD_TOKEN"
+          echo "::add-mask::$CD_TOKEN"
+          umask 077
+          trap 'rm -rf /tmp/cd-issue-dismiss' EXIT
+          mkdir -p /tmp/cd-issue-dismiss
+          curl -fsSL --max-time 35 https://www.clouddrive2.com/api/clouddrive.proto -o /tmp/cd-issue-dismiss/clouddrive.proto
+          python3 -m pip install --disable-pip-version-check -q protobuf grpcio-tools
+          python3 -m grpc_tools.protoc -I/tmp/cd-issue-dismiss --python_out=/tmp/cd-issue-dismiss /tmp/cd-issue-dismiss/clouddrive.proto
+          cat >/tmp/cd-issue-dismiss/dismiss.py <<'PY'
+          import os,ssl,http.client,struct,hashlib,re,json,collections,sys
+          from google.protobuf import message_factory
+          import clouddrive_pb2 as pb
+          TOKEN=os.environ["CD_TOKEN"]; S=pb.DESCRIPTOR.services_by_name["CloudDriveFileSrv"]
+          def cls(d):return message_factory.GetMessageClass(d)
+          def digest(s):return hashlib.sha256(str(s).encode()).hexdigest()[:12]
+          def name(m,f):
+           d=m.DESCRIPTOR.fields_by_name[f]; v=getattr(m,f)
+           return d.enum_type.values_by_number[int(v)].name if d.type==14 else str(v)
+          def cat(v):
+           s=str(v).lower()
+           if re.search(r"sync.owner|sync_owner|other.*instance|another.*instance|another.*sync|another.*backup|different.*instance|另一个.*(实例|同步)|其他.*(实例|同步)|占用|owner marker|ownership|sync.*owner|managed by",s):return "OWNER_CONFLICT"
+           if re.search(r"permission|forbidden|denied|认证|权限|401|403",s):return "PERMISSION"
+           if re.search(r"timeout|timed out|connection|网络|超时",s):return "NETWORK"
+           if re.search(r"not found|no such|不存在|未找到",s):return "NOT_FOUND"
+           if re.search(r"conflict|冲突|same file|duplicate",s):return "FILE_CONFLICT"
+           if re.search(r"error|failed|失败|错误",s):return "OTHER_FAILURE"
+           return "OTHER"
+          def rpc(method,req=None):
+           d=S.methods_by_name[method]; req=req or cls(d.input_type)(); dat=req.SerializeToString()
+           c=http.client.HTTPSConnection("cd.evren.cn",443,timeout=50,context=ssl.create_default_context())
+           try:
+            c.request("POST","/clouddrive.CloudDriveFileSrv/"+method,b"\0"+struct.pack(">I",len(dat))+dat,{"content-type":"application/grpc-web+proto","accept":"application/grpc-web+proto","x-grpc-web":"1","origin":"https://cd.evren.cn","authorization":"Bearer "+TOKEN})
+            r=c.getresponse(); h={k.lower():v for k,v in r.getheaders()}; code=r.status; raw=r.read(9_000_001)
+           finally:c.close()
+           if len(raw)>9_000_000:raise RuntimeError(method+" oversized")
+           pos=0; trailers={};out=[]
+           while pos<len(raw):
+            if pos+5>len(raw):raise RuntimeError("short frame")
+            fl=raw[pos]; length=int.from_bytes(raw[pos+1:pos+5],"big");pos+=5
+            if pos+length>len(raw):raise RuntimeError("bad frame")
+            chunk=raw[pos:pos+length];pos+=length
+            if fl&0x80:
+             for line in chunk.decode(errors="replace").splitlines():
+              if ":" in line:
+               k,v=line.split(":",1);trailers[k.lower().strip()]=v.strip()
+            else:
+             if fl&1:raise RuntimeError("compressed frame")
+             x=cls(d.output_type)();x.ParseFromString(chunk);out.append(x)
+           grpc=trailers.get("grpc-status",h.get("grpc-status"))
+           print("RPC",method,"http",code,"grpc",grpc or "MISSING","messages",len(out),flush=True)
+           if code!=200 or grpc!="0":raise RuntimeError(method+": bad status "+str(code)+"/"+str(grpc))
+           return out
+          def under(path,root):
+           p=path.rstrip("/");r=root.rstrip("/")
+           return bool(r and (p==r or p.startswith(r+"/")))
+          def related(a,b):return under(a,b) or under(b,a)
+          def getfield(obj,key,default=None):return getattr(obj,key,default)
+          
+          
+          import collections,json,hashlib,time
+          def enum_name(msg,field):
+           d=msg.DESCRIPTOR.fields_by_name[field]
+           return d.enum_type.values_by_number[int(getattr(msg,field))].name
+          def h(p):return hashlib.sha256(p.encode()).hexdigest()[:12]
+          required=("BackupGetAll","BackupGetSyncIssues","BackupResolveSyncIssue")
+          if any(n not in S.methods_by_name for n in required):
+           raise RuntimeError("Required official backup methods missing")
+          act=S.methods_by_name["BackupResolveSyncIssue"].input_type.fields_by_name["action"].enum_type
+          if "Dismiss" not in act.values_by_name:
+           raise RuntimeError("Dismiss operation unavailable")
+          dismiss=act.values_by_name["Dismiss"].number
+          def get_backups():
+           return [b for response in rpc("BackupGetAll") for b in response.backups]
+          def get_issues(root):
+           q=cls(S.methods_by_name["BackupGetSyncIssues"].input_type)()
+           q.value=root
+           return [i for response in rpc("BackupGetSyncIssues",q) for i in response.issues if not i.resolved]
+          baselines=get_backups()
+          paths=[b.backup.sourcePath for b in baselines]
+          if len(paths)!=7 or any(not p for p in paths) or len(set(paths))!=len(paths):
+           raise RuntimeError("Expected seven distinct backup sources, refusing unexpected mutation")
+          total_requested=0
+          for round_no in (1,2):
+           print("SWEEP_BEGIN",round_no,flush=True)
+           processed=0
+           for idx,root in enumerate(paths):
+            issues=get_issues(root)
+            uniq=list(dict.fromkeys(int(i.id) for i in issues))
+            if len(uniq)!=len(issues):
+             raise RuntimeError("Duplicate issue IDs in one backup")
+            print("BACKUP_BEFORE",json.dumps({"backup":idx+1,"hash":h(root),"outstanding":len(uniq),
+             "types":dict(collections.Counter(enum_name(i,"kind") for i in issues))},ensure_ascii=False),flush=True)
+            for offset in range(0,len(uniq),50):
+             subset=uniq[offset:offset+50]
+             r=cls(S.methods_by_name["BackupResolveSyncIssue"].input_type)()
+             r.sourcePath=root
+             r.issueIds.extend(subset)
+             r.action=dismiss
+             r.confirmed=False
+             out=rpc("BackupResolveSyncIssue",r)
+             if len(out)!=1 or not out[0].success:
+              raise RuntimeError("Dismiss refused for backup "+str(idx+1))
+             processed+=len(subset)
+             total_requested+=len(subset)
+             if total_requested>3500:raise RuntimeError("Safety limit exceeded")
+            after=get_issues(root)
+            print("BACKUP_AFTER",json.dumps({"backup":idx+1,"requestedDismiss":len(uniq),
+               "stillOutstanding":len(after),"oldRemaining":len(set(uniq)&{int(i.id) for i in after})},ensure_ascii=False),flush=True)
+           print("SWEEP_FINISH",json.dumps({"round":round_no,"acceptedIssueActions":processed}),flush=True)
+           if round_no==1:time.sleep(8)
+          time.sleep(5)
+          last=get_backups()
+          for idx,root in enumerate(paths):
+           b=next(x for x in last if x.backup.sourcePath==root)
+           z=get_issues(root)
+           print("FINAL_BACKUP",json.dumps({"backup":idx+1,"hash":h(root),"enabled":b.backup.isEnabled,
+           "state":enum_name(b,"status"),"openSyncIssues":b.openSyncIssues,
+           "returnedOutstanding":len(z),"types":dict(collections.Counter(enum_name(i,"kind") for i in z))},ensure_ascii=False),flush=True)
+          print("FINAL_REQUESTED_DISMISS",total_requested)
+          
+          PY
+          PYTHONPATH=/tmp/cd-issue-dismiss python3 -u /tmp/cd-issue-dismiss/dismiss.py
