@@ -74,7 +74,7 @@ jobs:
                   raise RuntimeError(method+": HTTP/grpc not successful (especially code 16 means unauthenticated)")
               return messages
           
-          def fields(d): return [(f.name, f.type, f.label, f.message_type.full_name if f.message_type else "") for f in d.fields]
+          def fields(d): return [(f.name, f.type, f.is_repeated, f.message_type.full_name if f.message_type else "") for f in d.fields]
           def classify(s):
               s=s.lower()
               rules=[
@@ -105,10 +105,10 @@ jobs:
               if depth>4: return {"nested":"depth_limit"}
               for f,v in msg.ListFields():
                   if f.type==f.TYPE_MESSAGE:
-                      if f.label==f.LABEL_REPEATED:
+                      if f.is_repeated:
                           result[f.name]={"count":len(v),"sample":[summarize(z,depth+1) for z in list(v)[:8]]}
                       else: result[f.name]=summarize(v,depth+1)
-                  elif f.label==f.LABEL_REPEATED:
+                  elif f.is_repeated:
                       result[f.name]={"count":len(v),"sample":[safe_value(f,z) for z in list(v)[:8]]}
                   else:
                       result[f.name]=safe_value(f,v)
