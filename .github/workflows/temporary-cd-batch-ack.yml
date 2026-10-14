@@ -1,0 +1,112 @@
+name: Temporary CloudDrive batch acknowledge notices
+on:
+  push:
+    paths: ['.github/workflows/temporary-cd-batch-ack.yml']
+permissions:
+  contents: read
+jobs:
+  audit:
+    if: github.repository == 'zhumiao-cloud/ddiittumap' && github.actor == 'zhumiao-cloud' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Acknowledge sync notifications only without touching files
+        shell: bash
+        env:
+          CD_TOKEN: ${{ secrets.CD_API_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "$CD_TOKEN"
+          echo "::add-mask::$CD_TOKEN"
+          umask 077
+          mkdir -p /tmp/cd-audit
+          trap 'rm -rf /tmp/cd-audit' EXIT
+          curl -fsSL --max-time 35 https://www.clouddrive2.com/api/clouddrive.proto -o /tmp/cd-audit/clouddrive.proto
+          python3 -m pip -q install protobuf grpcio-tools
+          python3 -m grpc_tools.protoc -I/tmp/cd-audit --python_out=/tmp/cd-audit /tmp/cd-audit/clouddrive.proto
+          cat > /tmp/cd-audit/check.py <<'PY'
+          import os, ssl, http.client, struct, json, collections, hashlib
+          from google.protobuf import message_factory
+          import clouddrive_pb2 as pb
+          token=os.environ["CD_TOKEN"]
+          if not token: raise RuntimeError("CD_API_KEY missing")
+          svc=pb.DESCRIPTOR.services_by_name["CloudDriveFileSrv"]
+          def cls(t): return message_factory.GetMessageClass(t)
+          def req(method,r=None):
+              d=svc.methods_by_name[method]
+              r=r or cls(d.input_type)()
+              p=r.SerializeToString()
+              c=http.client.HTTPSConnection("cd.evren.cn",443,timeout=50,context=ssl.create_default_context())
+              try:
+                  c.request("POST",f"/clouddrive.CloudDriveFileSrv/{method}",b"\0"+struct.pack(">I",len(p))+p,{
+                      "authorization":"Bearer "+token,"content-type":"application/grpc-web+proto",
+                      "accept":"application/grpc-web+proto","x-grpc-web":"1","origin":"https://cd.evren.cn"})
+                  z=c.getresponse()
+                  status=z.status
+                  headers={k.lower():v for k,v in z.getheaders()}
+                  raw=z.read(12000001)
+              finally: c.close()
+              if len(raw)>12000000: raise RuntimeError(method+" oversized")
+              off=0; tra={}; out=[]
+              while off<len(raw):
+                  if off+5>len(raw):raise RuntimeError("truncated frame")
+                  b=raw[off]; n=int.from_bytes(raw[off+1:off+5],"big"); off+=5
+                  if off+n>len(raw):raise RuntimeError("truncated payload")
+                  dat=raw[off:off+n];off+=n
+                  if b&128:
+                      for line in dat.decode("utf-8","replace").splitlines():
+                          if ":" in line:
+                              k,v=line.split(":",1);tra[k.lower().strip()]=v.strip()
+                  else:
+                      if b&1:raise RuntimeError("compressed message unsupported")
+                      obj=cls(d.output_type)();obj.ParseFromString(dat);out.append(obj)
+              grpc=tra.get("grpc-status",headers.get("grpc-status"))
+              print("RPC",method,"HTTP",status,"GRPC",grpc or "MISSING","MESSAGES",len(out))
+              if status!=200 or grpc!="0":raise RuntimeError(method+" failed; grpc=16 means unauthorized")
+              return out
+          def ev(msg,name):
+              f=msg.DESCRIPTOR.fields_by_name[name]
+              return f.enum_type.values_by_number[int(getattr(msg,name))].name
+          # Acknowledge only newly surfaced notices; no storage operation, deletion, overwrite or merge.
+          desc=svc.methods_by_name["BackupResolveSyncIssue"].input_type
+          action=desc.fields_by_name["action"].enum_type.values_by_name["Dismiss"].number
+          states=req("BackupGetAll")[0].backups
+          print("BEFORE",json.dumps([int(x.openSyncIssues) for x in states]))
+          total=0; failures=0
+          for i,b in enumerate(states,1):
+              if not b.openSyncIssues: continue
+              policy=ev(b.backup,"fileDeleteRule")
+              if not (b.backup.isEnabled and policy=="Keep" and
+                  not b.backup.syncDeletionsTwoWay and not b.backup.twoWayHardDelete and
+                  not b.heldDeletionGuards):
+                  print("SKIP_PROTECTED",i,int(b.openSyncIssues))
+                  continue
+              request=cls(svc.methods_by_name["BackupGetSyncIssues"].input_type)(value=b.backup.sourcePath)
+              issues=[issue for response in req("BackupGetSyncIssues",request) for issue in response.issues]
+              allowed=("NotComparable","ReplaceFailed")
+              ids=[x.id for x in issues if not x.resolved and ev(x,"kind") in allowed and x.id]
+              kinds=collections.Counter(ev(x,"kind") for x in issues if x.id in ids)
+              print("CANDIDATES",json.dumps({"index":i,"count":len(ids),"kinds":dict(kinds)}))
+              for k in range(0,len(ids),25):
+                  chunk=ids[k:k+25]
+                  query=cls(desc)()
+                  query.sourcePath=b.backup.sourcePath
+                  query.issueIds.extend(chunk)
+                  query.action=action
+                  query.confirmed=False
+                  reply=req("BackupResolveSyncIssue",query)
+                  success=bool(reply and reply[0].success)
+                  print("BATCH",i,"size",len(chunk),"accepted",success)
+                  if success:total+=len(chunk)
+                  else:failures+=len(chunk)
+              remaining=[x for reply in req("BackupGetSyncIssues",request) for x in reply.issues]
+              remainder_ids=set(int(x.id) for x in remaining)
+              pending=sum(1 for ident in ids if ident in remainder_ids)
+              print("RECHECK",i,"previous_targets_still_present",pending,"current_visible",len(remaining))
+          print("SUCCESSFUL_REQUESTED_IDS",total,"REJECTED_IDS",failures)
+          after=req("BackupGetAll")[0].backups
+          print("AFTER",json.dumps([int(x.openSyncIssues) for x in after]))
+          if failures: raise RuntimeError("One or more dismiss batches failed")
+          PY
+          PYTHONPATH=/tmp/cd-audit python3 /tmp/cd-audit/check.py
