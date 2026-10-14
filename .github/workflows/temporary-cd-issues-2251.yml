@@ -94,7 +94,12 @@ jobs:
           def get_issues(root):
            q=cls(S.methods_by_name["BackupGetSyncIssues"].input_type)()
            q.value=root
-           return [i for response in rpc("BackupGetSyncIssues",q) for i in response.issues if not i.resolved]
+           for attempt in range(3):
+            try:return [i for response in rpc("BackupGetSyncIssues",q) for i in response.issues if not i.resolved]
+            except (OSError,RuntimeError,ValueError) as e:
+             print("READ_RETRY",type(e).__name__,attempt+1,flush=True)
+             if attempt==2:raise
+             time.sleep(2)
           baselines=get_backups()
           paths=[b.backup.sourcePath for b in baselines]
           if len(paths)!=7 or any(not p for p in paths) or len(set(paths))!=len(paths):
@@ -119,9 +124,20 @@ jobs:
              r.issueIds.extend(subset)
              r.action=dismiss
              r.confirmed=False
-             out=rpc("BackupResolveSyncIssue",r)
-             if len(out)!=1 or not out[0].success:
-              raise RuntimeError("Dismiss refused for backup "+str(idx+1))
+             try:
+              out=rpc("BackupResolveSyncIssue",r)
+              if len(out)!=1 or not out[0].success:raise RuntimeError("Dismiss rejected")
+             except (OSError,RuntimeError,ValueError) as e:
+              print("ACK_UNCERTAIN_RECHECK",idx+1,len(subset),type(e).__name__,flush=True)
+              time.sleep(2)
+              still={int(v.id) for v in get_issues(root)}
+              remaining=[k for k in subset if k in still]
+              if remaining:
+               r.issueIds.clear()
+               r.issueIds.extend(remaining)
+               out=rpc("BackupResolveSyncIssue",r)
+               if len(out)!=1 or not out[0].success:raise RuntimeError("Rechecked dismiss rejected")
+              print("ACK_RECHECK_DONE",idx+1,"original",len(subset),"remainingRetried",len(remaining),flush=True)
              processed+=len(subset)
              total_requested+=len(subset)
              if total_requested>10000:raise RuntimeError("Safety limit exceeded")
