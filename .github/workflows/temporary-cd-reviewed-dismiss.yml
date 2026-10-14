@@ -1,0 +1,156 @@
+name: One-time CloudDrive reviewed sync issue acknowledgment
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary-cd-reviewed-dismiss.yml'
+permissions:
+  contents: read
+jobs:
+  acknowledge:
+    if: github.repository == 'zhumiao-cloud/ddiittumap' && github.actor == 'zhumiao-cloud' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Acknowledge explicitly reviewed sync issues without file changes
+        shell: bash
+        env:
+          CD_TOKEN: ${{ secrets.CD_API_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "$CD_TOKEN"
+          echo "::add-mask::$CD_TOKEN"
+          umask 077
+          trap 'rm -rf /tmp/cd-once' EXIT
+          mkdir -p /tmp/cd-once
+          curl -fsSL --max-time 35 https://www.clouddrive2.com/api/clouddrive.proto -o /tmp/cd-once/clouddrive.proto
+          python3 -m pip install --disable-pip-version-check -q protobuf grpcio-tools
+          python3 -m grpc_tools.protoc -I/tmp/cd-once --python_out=/tmp/cd-once /tmp/cd-once/clouddrive.proto
+          cat > /tmp/cd-once/ack.py <<'PY'
+          import os,ssl,http.client,struct,json,time,collections,sys
+          from google.protobuf import message_factory
+          import clouddrive_pb2 as pb
+          
+          TOKEN=os.environ.get("CD_TOKEN","")
+          if not TOKEN:
+              raise RuntimeError("Missing CD_API_KEY secret")
+          SVC=pb.DESCRIPTOR.services_by_name["CloudDriveFileSrv"]
+          def cls(d): return message_factory.GetMessageClass(d)
+          def rpc(name,req=None):
+              meth=SVC.methods_by_name[name]
+              req=req if req is not None else cls(meth.input_type)()
+              p=req.SerializeToString()
+              c=http.client.HTTPSConnection("cd.evren.cn",443,timeout=50,context=ssl.create_default_context())
+              try:
+                  c.request("POST","/clouddrive.CloudDriveFileSrv/"+name,b"\0"+struct.pack(">I",len(p))+p,{
+                    "content-type":"application/grpc-web+proto",
+                    "accept":"application/grpc-web+proto",
+                    "x-grpc-web":"1",
+                    "origin":"https://cd.evren.cn",
+                    "authorization":"Bearer "+TOKEN})
+                  r=c.getresponse(); code=r.status
+                  h={k.lower():v for k,v in r.getheaders()}
+                  raw=r.read(16000001)
+              finally:
+                  c.close()
+              if len(raw)>16000000:
+                  raise RuntimeError(name+": payload exceeds limit")
+              pos=0; trailer={}; out=[]
+              while pos<len(raw):
+                  if pos+5>len(raw): raise RuntimeError(name+": truncated grpc frame")
+                  flag=raw[pos]; n=int.from_bytes(raw[pos+1:pos+5],"big");pos+=5
+                  if pos+n>len(raw): raise RuntimeError(name+": invalid grpc frame")
+                  payload=raw[pos:pos+n];pos+=n
+                  if flag&0x80:
+                      for s in payload.decode("utf-8","replace").splitlines():
+                          if ":" in s:
+                              k,v=s.split(":",1);trailer[k.strip().lower()]=v.strip()
+                  else:
+                      if flag&1:raise RuntimeError(name+": compressed frame unsupported")
+                      q=cls(meth.output_type)();q.ParseFromString(payload);out.append(q)
+              grpc=trailer.get("grpc-status",h.get("grpc-status"))
+              if code!=200 or grpc!="0":
+                  raise RuntimeError(name+": HTTP="+str(code)+" grpc-status="+str(grpc))
+              return out
+          
+          def status():
+              a=rpc("BackupGetAll")
+              if len(a)!=1: raise RuntimeError("BackupGetAll unexpected response length")
+              return list(a[0].backups)
+          def enum(field,val):
+              return field.enum_type.values_by_number[int(val)].name
+          def issues(path):
+              req=cls(SVC.methods_by_name["BackupGetSyncIssues"].input_type)()
+              req.value=path
+              return [i for x in rpc("BackupGetSyncIssues",req) for i in x.issues if not i.resolved]
+          def resolve(path, ids):
+              req=cls(SVC.methods_by_name["BackupResolveSyncIssue"].input_type)()
+              req.sourcePath=path
+              req.issueIds.extend(ids)
+              req.action=0
+              req.confirmed=False
+              results=rpc("BackupResolveSyncIssue",req)
+              if len(results)!=1 or not results[0].success:
+                  return False, "operation not accepted"
+              if list(results[0].resultFilePaths):
+                  raise RuntimeError("Dismiss unexpectedly returned file mutations; halt")
+              return True, "accepted"
+          
+          assert enum(SVC.methods_by_name["BackupResolveSyncIssue"].input_type.fields_by_name["action"],0)=="Dismiss"
+          start=status()
+          assert len(start)==6, "unexpected backup count"
+          print("BASELINE_COUNTS",json.dumps([int(b.openSyncIssues) for b in start]),flush=True)
+          print("BASELINE_RECENT_ERRORS",json.dumps([len(b.errors) for b in start]),flush=True)
+          sources=[b.backup.sourcePath for b in start]
+          if len(set(sources))!=len(sources):raise RuntimeError("non-unique backup source paths")
+          total_ok=0
+          total_rejected=0
+          for index,(b,source) in enumerate(zip(start,sources),1):
+              budget=int(b.openSyncIssues)
+              print("START_BACKUP",index,"open",budget,flush=True)
+              if not b.backup.isEnabled or not budget:
+                  continue
+              processed=set()
+              attempted_failed=set()
+              rounds=0
+              stagnant=0
+              while len(processed)<budget:
+                  rounds+=1
+                  if rounds>max(15,3*(budget//50+1)):
+                      print("HALT_BACKUP",index,"round limit",flush=True)
+                      break
+                  records=issues(source)
+                  ids=list(dict.fromkeys(i.id for i in records if i.id and i.id not in processed and i.id not in attempted_failed))
+                  if not ids:
+                      print("STOP_BACKUP",index,"no new eligible visible issue IDs","visible",len(records),flush=True)
+                      break
+                  batch=ids[:min(50,budget-len(processed))]
+                  before=status()[index-1].openSyncIssues
+                  success,detail=resolve(source,batch)
+                  if success:
+                      processed.update(batch)
+                      total_ok+=len(batch)
+                  else:
+                      print("BATCH_REJECTED",index,len(batch),flush=True)
+                      # Do not reinterpret an API error as success, and do not overwrite.
+                      if len(batch)>1:
+                          for id in batch:
+                              ok,_=resolve(source,[id])
+                              if ok:
+                                  processed.add(id);total_ok+=1
+                              else:
+                                  attempted_failed.add(id);total_rejected+=1
+                      else:
+                          attempted_failed.add(batch[0]);total_rejected+=1
+                  if rounds%4==0 or len(processed)>=budget or before<=len(batch):
+                      after=status()[index-1].openSyncIssues
+                      print("PROGRESS",index,"acknowledged",len(processed),"baseline",budget,"server_remaining",int(after),"rejected",len(attempted_failed),flush=True)
+              now=status()[index-1]
+              print("BACKUP_DONE",index,"acknowledged",len(processed),"server_remaining",int(now.openSyncIssues),
+                "errors_in_recent_history",len(now.errors),"unaccepted",len(attempted_failed),flush=True)
+          final=status()
+          print("FINAL_OPEN_COUNTS",json.dumps([int(b.openSyncIssues) for b in final]),flush=True)
+          print("FINAL_RECENT_ERRORS",json.dumps([len(b.errors) for b in final]),flush=True)
+          print("SUMMARY",json.dumps({"accepted_issue_ids":total_ok,"rejected_issue_ids":total_rejected,"before":sum(int(b.openSyncIssues) for b in start),"after":sum(int(b.openSyncIssues) for b in final)}),flush=True)
+          PY
+          PYTHONPATH=/tmp/cd-once python3 -u /tmp/cd-once/ack.py
