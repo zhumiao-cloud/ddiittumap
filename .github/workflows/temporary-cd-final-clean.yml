@@ -19,7 +19,7 @@ jobs:
         run: |
           set -euo pipefail
           set +x
-          for run in 38502388917 38502861183 38502957338 38503461717 38503541019; do
+          for run in 38503648793 38504163600 38504201763 38504271984 38504375629; do
             for art in $(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/artifacts" --jq '.artifacts[].id' 2>/dev/null || true); do
               if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${art}" >/dev/null 2>&1; then
                 echo "ARTIFACT_REMOVED ${run}"
