@@ -149,7 +149,7 @@ jobs:
            if method not in S.methods_by_name:continue
            try:
             req=cls(S.methods_by_name[method].input_type)()
-            for k,val in (("getAll",True),("itemsPerPage",150),("pageNumber",1)):
+            for k,val in (("getAll",False),("itemsPerPage",100),("pageNumber",1)):
              if k in req.DESCRIPTOR.fields_by_name:setattr(req,k,val)
             ans,ms=benchmark(method,req)
             for z in ans:
@@ -162,43 +162,29 @@ jobs:
                 " ".join(str(getattr(e,k)) for k in e.DESCRIPTOR.fields_by_name if any(t in k.lower() for t in ("error","message","reason"))) ) for e in entries),
                 "entryFields":sorted(set(k for e in entries[:3] for k in e.DESCRIPTOR.fields_by_name if any(v in k.lower() for v in ("status","speed","error","progress","size","time","bytes","state"))))},ensure_ascii=False))
            except Exception as e:print("TRANSFER_ERROR",method,type(e).__name__,sha(str(e)))
-          print("PANEL_DIAGNOSTIC_BEGIN")
-          k=os.environ.get("PANEL_KEY","")
-          if not k:print("PANEL_API_KEY_NOT_AVAILABLE")
-          else:
-           import datetime
-           def panel(path):
-            ts=str(int(time.time()));token=hashlib.md5(("1panel"+k+ts).encode()).hexdigest()
-            url="https://panel.evren.cn"+path
-            t=time.perf_counter()
-            req=urllib.request.Request(url,headers={"1Panel-Token":token,"1Panel-Timestamp":ts,"Accept":"application/json","User-Agent":"CloudDrive-audit/1.0"})
-            try:
-             with urllib.request.urlopen(req,timeout=20) as r:
-              raw=r.read(2000000);data=json.loads(raw);code=r.status
-            except urllib.error.HTTPError as e:
-             print("PANEL_HTTP_ERROR",path,e.code);return
-            except Exception as e:
-             print("PANEL_CONNECT_ERROR",path,type(e).__name__);return
-            root=data.get("data") if isinstance(data,dict) else None
-            print("PANEL_RESPONSE",path,"http",code,"apiCode",data.get("code") if isinstance(data,dict) else "unknown","latencyMs",round((time.perf_counter()-t)*1000))
-            if root is None:return
-            def extract(v,p="",depth=0):
-             if depth>5:return {}
-             out={}
-             if isinstance(v,dict):
-              for key,x in v.items():
-               nam=str(key).lower();sub=(p+"."+str(key)).strip(".")
-               if isinstance(x,(dict,list)):out.update(extract(x,sub,depth+1))
-               elif isinstance(x,(int,float)) and not isinstance(x,bool) and any(t in nam for t in ("net","cpu","mem","disk","io","byte","speed","tx","rx","send","recv","rate","load")):
-                out[sub]=x
-             if isinstance(v,list):
-              for x in v[:12]:out.update(extract(x,p+"[]",depth+1))
-             return out
-            vals=extract(root)
-            print("PANEL_NUMERIC_METRICS",path,json.dumps(dict(list(vals.items())[:80]),ensure_ascii=False))
-           for endpoint in ("/api/v2/dashboard/current/all/all","/api/v2/containers/list/stats"):
-            panel(endpoint)
+          print("WAIT_FOR_TRANSFER_PROGRESS")
+          time.sleep(20)
+          for meth in ("GetUploadFileList","GetDownloadFileList","GetAllTasksCount"):
+           try:
+            if meth=="GetUploadFileList":
+             rq=cls(S.methods_by_name[meth].input_type)()
+             rq.getAll=False
+             rq.itemsPerPage=100
+             rq.pageNumber=1
+             result=rpc(meth,rq)
+             for k in result:print("FOLLOWUP_UPLOAD",json.dumps({"total":k.totalCount,"globalBytesPerSecond":k.globalBytesPerSecond,"totalBytes":k.totalBytes,"finishedBytes":k.finishedBytes,
+              "sampleStatuses":dict(collections.Counter(enum(v,"statusEnum") if "statusEnum" in v.DESCRIPTOR.fields_by_name else "OTHER" for v in k.uploadFiles))},ensure_ascii=False),flush=True)
+            elif meth=="GetDownloadFileList":
+             result=rpc(meth)
+             for k in result:print("FOLLOWUP_DOWNLOAD",json.dumps({"total":len(k.downloadFiles),"globalBytesPerSecond":k.globalBytesPerSecond,
+              "nonzeroTaskSpeeds":sum(1 for v in k.downloadFiles if v.bytesPerSecond>0),
+              "sampleTaskSpeeds":sorted([round(v.bytesPerSecond,1) for v in k.downloadFiles],reverse=True)[:8]},ensure_ascii=False),flush=True)
+            else:
+             result=rpc(meth)
+             for k in result:print("FOLLOWUP_TASK_COUNTS",json.dumps({"up":k.uploadCount,"down":k.downloadCount}),flush=True)
+           except Exception as e:print("FOLLOWUP_ERROR",meth,type(e).__name__,sha(str(e)),flush=True)
           print("DIAGNOSTIC_END")
+
           
           PY
           PYTHONPATH=/tmp/cd-audit-20261014 python3 -u /tmp/cd-audit-20261014/audit.py
