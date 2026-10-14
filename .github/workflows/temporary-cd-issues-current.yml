@@ -1,4 +1,4 @@
-name: One-shot CloudDrive current sync issue dismissal
+name: One-shot CloudDrive post-speed-repair issue dismissal
 on:
   push:
     paths:
