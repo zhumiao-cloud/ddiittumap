@@ -41,7 +41,7 @@ jobs:
               conn=http.client.HTTPSConnection("cd.evren.cn",443,timeout=35,context=ssl.create_default_context())
               try:
                   conn.request("POST","/clouddrive.CloudDriveFileSrv/"+name,b"\x00"+struct.pack(">I",len(data))+data,{"content-type":"application/grpc-web+proto","x-grpc-web":"1","origin":"https://cd.evren.cn","authorization":"Bearer "+token})
-                  resp=conn.getresponse();http=resp.status;heads={k.lower():v for k,v in resp.getheaders()};raw=resp.read(5000001)
+                  resp=conn.getresponse();http_code=resp.status;heads={k.lower():v for k,v in resp.getheaders()};raw=resp.read(5000001)
               finally:conn.close()
               if len(raw)>5000000:raise RuntimeError("Response exceeds safe size")
               trailer={};out=[];pos=0
@@ -58,15 +58,15 @@ jobs:
                       if fl&1:raise RuntimeError("Compressed frame unsupported")
                       obj=cls(meth.output_type)();obj.ParseFromString(chunk);out.append(obj)
               st=trailer.get("grpc-status",heads.get("grpc-status"))
-              print("RPC_STATUS",name,"HTTP",http,"grpc",st,flush=True)
-              if http!=200 or st!="0":raise RuntimeError("Failed "+name+" HTTP="+str(http)+" grpc="+str(st))
+              print("RPC_STATUS",name,"HTTP",http_code,"grpc",st,flush=True)
+              if http_code!=200 or st!="0":raise RuntimeError("Failed "+name+" HTTP="+str(http_code)+" grpc="+str(st))
               return out
           selected=[]
           for method in svc.methods:
               if any(w in method.name.lower() for w in ("sftp","stor","mount","refre","reload","reconnect","subfiles","fileinfo","cloudapi","getfile")):
                   selected.append((method.name,fs(method.input_type),fs(method.output_type)))
           for x in selected: print("RPC_SCHEMA",json.dumps(x,ensure_ascii=False),flush=True)
-          for name in ["GetSubFiles","GetFileInfo","GetMountPoints","GetAllCloudStorages"]:
+          for name in ["GetSubFiles","GetMountPoints","GetAllCloudApis"]:
               if name not in svc.methods_by_name:continue
               desc=svc.methods_by_name[name].input_type
               rq=cls(desc)()
