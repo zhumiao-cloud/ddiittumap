@@ -66,6 +66,27 @@ jobs:
               if any(w in method.name.lower() for w in ("sftp","stor","mount","refre","reload","reconnect","subfiles","fileinfo","cloudapi","getfile")):
                   selected.append((method.name,fs(method.input_type),fs(method.output_type)))
           for x in selected: print("RPC_SCHEMA",json.dumps(x,ensure_ascii=False),flush=True)
+          for meth in svc.methods:
+              if any(w in meth.name.lower() for w in ("refresh","reconnect","restart","reload","cache","reauth","api","token")):
+                  print("RPC_CAPABILITY",meth.name,fs(meth.input_type),flush=True)
+          if "GetAllCloudApis" in svc.methods_by_name:
+              itemdesc=svc.methods_by_name["GetAllCloudApis"].output_type.fields_by_name["apis"].message_type
+              print("CLOUDAPI_FIELD_TYPES",fs(itemdesc),flush=True)
+              for resp in rpc("GetAllCloudApis"):
+                  for api in resp.apis:
+                      if any(f.type==9 and f.name.lower() in ("name","path") and "sftp" in str(getattr(api,f.name)).lower() for f in api.DESCRIPTOR.fields):
+                          view=[]
+                          for f in api.DESCRIPTOR.fields:
+                              if any(w in f.name.lower() for w in ("state","status","connect","login","expired","error","online","enable","valid","mount")):
+                                  val=getattr(api,f.name)
+                                  if f.enum_type:
+                                      val=f.enum_type.values_by_number[int(val)].name
+                                  elif f.type==9:
+                                      val="present" if val else "empty"
+                                  elif f.type==11:
+                                      val="nested"
+                                  view.append((f.name,str(val)))
+                          print("SFTP_STATE",json.dumps(view),flush=True)
           for name in ["GetSubFiles","GetMountPoints","GetAllCloudApis"]:
               if name not in svc.methods_by_name:continue
               desc=svc.methods_by_name[name].input_type
