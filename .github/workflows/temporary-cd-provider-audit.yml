@@ -109,6 +109,15 @@ jobs:
           for index,b in enumerate(backups):
            print("BACKUP_PROVIDER",json.dumps({"slot":index+1,"source":classify_path(b.backup.sourcePath),
            "errorTypes":dict(collections.Counter(classify(e.message) for e in b.errors)),"errors":len(b.errors),"openIssues":b.openSyncIssues}))
+          for index,b in enumerate(backups):
+           dest=[]
+           for d in b.backup.destinations:
+            matches=[]
+            for field,val in d.ListFields():
+             if field.type==field.TYPE_STRING and any(k in field.name.lower() for k in ("path","destination","target")):
+              matches.append(classify_path(str(val)))
+            dest.append(matches or ["UNCLASSIFIED"])
+           print("BACKUP_DEST_TYPES",json.dumps({"slot":index+1,"destinations":dest}),flush=True)
           print("BACKUP_SCHEMA",[(f.name,f.type,f.is_repeated) for f in backups[0].backup.DESCRIPTOR.fields])
           for met in [x for x in S.methods if any(z in x.name.lower() for z in ("upload","retry","restart","download"))]:
            print("TRANSFER_RPC",met.name,[(f.name,f.type,f.is_repeated) for f in met.input_type.fields])
@@ -120,6 +129,7 @@ jobs:
              print("FATAL_UPLOAD_SAMPLE",json.dumps({"total":q.totalCount,"filtered":q.totalCountFiltered,"returned":len(q.uploadFiles),
               "errorTypes":dict(collections.Counter(classify(x.errorMessage) for x in q.uploadFiles)),
               "entryFieldNames":[f.name for f in q.uploadFiles[0].DESCRIPTOR.fields] if q.uploadFiles else []}))
+   print("FATAL_UPLOAD_DESTS",json.dumps({"categories":dict(collections.Counter(classify_path(x.destPath) for x in q.uploadFiles)),"errorsByDest":dict(collections.Counter(classify_path(x.destPath)+":"+classify(x.errorMessage) for x in q.uploadFiles))},ensure_ascii=False))
            except Exception as e:print("FATAL_FILTER_FAILED",type(e).__name__)
           d=rpc("GetDownloadFileList")
           for z in d:
