@@ -69,12 +69,18 @@ jobs:
            p=b.backup.sourcePath
            print("BACKUP",json.dumps({"index":idx,"source_hash":digest(p),"encrypted_name_match":("加密" in p or "encrypt" in p.lower()),"enabled":b.backup.isEnabled,"status":enum(b.DESCRIPTOR.fields_by_name["status"],b.status),"delete_policy":enum(b.backup.DESCRIPTOR.fields_by_name["fileDeleteRule"],b.backup.fileDeleteRule),"two_way_delete":bool(b.backup.syncDeletionsTwoWay),"hard_delete":bool(b.backup.twoWayHardDelete),"heldDeletionGuards":int(b.heldDeletionGuards),"openSyncIssues":int(b.openSyncIssues),"last_errors_count":len(b.errors)},ensure_ascii=False),flush=True)
            rq=cls(svc.methods_by_name["BackupGetSyncIssues"].input_type)();rq.value=p
-           issues=[x for r in rpc("BackupGetSyncIssues",rq) for x in r.issues if not x.resolved]
+           raw_issues=[x for r in rpc("BackupGetSyncIssues",rq) for x in r.issues]
+           issues=[x for x in raw_issues if not x.resolved]
+           print("ISSUE_RESPONSE",idx,"total_returned",len(raw_issues),"resolved",sum(bool(x.resolved) for x in raw_issues),flush=True)
            kinds=collections.Counter(enum(x.DESCRIPTOR.fields_by_name["kind"],x.kind) for x in issues)
            print("ISSUE_SUMMARY",idx,json.dumps(kinds,ensure_ascii=False),flush=True)
            for x in issues:
             kind=enum(x.DESCRIPTOR.fields_by_name["kind"],x.kind)
             if any(w in kind.lower() for w in ("delet","held","guard","mass","confirm")) or b.heldDeletionGuards:
              print("DELETE_CANDIDATE",json.dumps({"backup_index":idx,"issue_id":str(x.id),"kind":kind,"affected_count":x.affectedCount,"affected_folders":x.affectedFolders,"affected_paths_returned":len(x.affectedPaths),"replica_hash":digest(x.replica),"file_path_hash":digest(x.relativePath),"delete_rule":enum(x.DESCRIPTOR.fields_by_name["deleteRule"],x.deleteRule),"detail_hash":digest(x.detail),"detail_chars":len(x.detail)},ensure_ascii=False),flush=True)
+           if idx==6:
+            rq2=cls(svc.methods_by_name["BackupGetStatus"].input_type)();rq2.value=p
+            x=rpc("BackupGetStatus",rq2)[0]
+            print("ENCRYPTED_STATUS",json.dumps({"held":int(x.heldDeletionGuards),"status":enum(x.DESCRIPTOR.fields_by_name["status"],x.status),"status_message_hash":digest(x.statusMessage),"status_message_len":len(x.statusMessage),"replicas":[{"is_source":z.isSource,"open":int(z.openIssues),"state":enum(z.DESCRIPTOR.fields_by_name["state"],z.state),"path_hash":digest(z.path)} for z in x.replicaStatuses]},ensure_ascii=False),flush=True)
           PY
           PYTHONPATH=/tmp/cd-held python3 -u /tmp/cd-held/inspect.py
