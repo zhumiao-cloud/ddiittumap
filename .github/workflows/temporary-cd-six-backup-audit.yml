@@ -159,3 +159,5 @@ jobs:
           except Exception as exc:
               print("BACKUP_FETCH_FAILED",type(exc).__name__,str(exc)[:160])
               sys.exit(2)
+          PY
+          PYTHONPATH=/tmp/cd-once python3 /tmp/cd-once/audit.py
