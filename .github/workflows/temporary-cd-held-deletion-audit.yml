@@ -76,11 +76,5 @@ jobs:
             kind=enum(x.DESCRIPTOR.fields_by_name["kind"],x.kind)
             if any(w in kind.lower() for w in ("delet","held","guard","mass","confirm")) or b.heldDeletionGuards:
              print("DELETE_CANDIDATE",json.dumps({"backup_index":idx,"issue_id":str(x.id),"kind":kind,"affected_count":x.affectedCount,"affected_folders":x.affectedFolders,"affected_paths_returned":len(x.affectedPaths),"replica_hash":digest(x.replica),"file_path_hash":digest(x.relativePath),"delete_rule":enum(x.DESCRIPTOR.fields_by_name["deleteRule"],x.deleteRule),"detail_hash":digest(x.detail),"detail_chars":len(x.detail)},ensure_ascii=False),flush=True)
-           if b.heldDeletionGuards:
-            req=cls(svc.methods_by_name["BackupGetStatus"].input_type)();req.value=p
-           status=rpc("BackupGetStatus",req)
-           if status:
-            x=status[0]
-            print("HELD_GUARD_STATUS",json.dumps({"backup_index":idx,"held":int(x.heldDeletionGuards),"open_issues":int(x.openSyncIssues),"state":enum(x.DESCRIPTOR.fields_by_name["status"],x.status)},ensure_ascii=False),flush=True)
           PY
           PYTHONPATH=/tmp/cd-held python3 -u /tmp/cd-held/inspect.py
