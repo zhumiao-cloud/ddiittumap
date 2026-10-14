@@ -77,21 +77,7 @@ jobs:
           def getfield(obj,key,default=None):return getattr(obj,key,default)
           
           
-          import json
-          for m in S.methods:
-           if any(t in m.name.lower() for t in ("setting","speed","upload","download","retry","pause","resume")):
-            if any(t in m.name.lower() for t in ("setting","speed","retry","pause","resume")):
-             print("PROTO_METHOD",m.name,
-              "input",[(f.name,f.message_type.full_name if f.message_type else str(f.type),f.is_repeated) for f in m.input_type.fields],
-              "output",[(f.name,f.message_type.full_name if f.message_type else str(f.type)) for f in m.output_type.fields],flush=True)
-          r=rpc("GetSystemSettings")
-          for v in r:
-           print("LIMIT_SETTINGS",json.dumps({"maxDownloadSpeedKBytesPerSecond":v.maxDownloadSpeedKBytesPerSecond,
-           "maxUploadSpeedKBytesPerSecond":v.maxUploadSpeedKBytesPerSecond,
-           "maxPreProcessTasks":v.maxPreProcessTasks}),flush=True)
-          
-          PY
-          PYTHONPATH=/tmp/cd-setting-inspect python3 -u /tmp/cd-setting-inspect/read.py          import json,time
+          import json,time
           required=["GetSystemSettings","SetSystemSettings","GetUploadFileList","GetDownloadFileList"]
           if any(x not in S.methods_by_name for x in required):raise RuntimeError("Required RPC unavailable")
           getter=S.methods_by_name["GetSystemSettings"]
