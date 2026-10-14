@@ -1,0 +1,37 @@
+name: One-time SFTP operation run cleanup
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary-cd-sftp-run-cleanup.yml'
+permissions:
+  contents: read
+  actions: write
+jobs:
+  cleanup:
+    if: github.repository == 'zhumiao-cloud/ddiittumap' && github.event_name == 'push' && github.actor == 'zhumiao-cloud'
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Delete completed SFTP audit and refresh runs plus artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          set +x
+          for run in 38504404458 38504470268 38504569799 38504709570; do
+            for artifact in $(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/artifacts?per_page=100" --jq '.artifacts[].id' 2>/dev/null || true); do
+              if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact}" >/dev/null 2>&1; then
+                echo "ARTIFACT_DELETED run=${run}"
+              else
+                echo "ARTIFACT_DELETE_UNCONFIRMED run=${run}"
+              fi
+            done
+            if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/runs/${run}" >/dev/null 2>&1; then
+              echo "RUN_DELETED ${run}"
+            else
+              echo "RUN_DELETE_UNCONFIRMED ${run}"
+            fi
+          done
+          echo "CACHE_USAGE_NOT_CREATED_BY_THIS_TASK"
+          echo "SFTP_CLEANUP_FINISHED"
