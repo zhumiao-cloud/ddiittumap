@@ -1,0 +1,147 @@
+name: Temporary SFTP owner conflict post-repair verification
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary-cd-sftp-owner-verify.yml'
+permissions:
+  contents: read
+jobs:
+  audit:
+    if: github.repository == 'zhumiao-cloud/ddiittumap' && github.actor == 'zhumiao-cloud' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Confirm stable SFTP owner state and dismiss stale issue only
+        shell: bash
+        env:
+          CD_TOKEN: ${{ secrets.CD_API_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "$CD_TOKEN"
+          echo "::add-mask::$CD_TOKEN"
+          umask 077
+          trap 'rm -rf /tmp/sftp-owner-once' EXIT
+          mkdir -p /tmp/sftp-owner-once
+          curl -fsSL --max-time 35 https://www.clouddrive2.com/api/clouddrive.proto -o /tmp/sftp-owner-once/clouddrive.proto
+          python3 -m pip install --disable-pip-version-check -q protobuf grpcio-tools
+          python3 -m grpc_tools.protoc -I/tmp/sftp-owner-once --python_out=/tmp/sftp-owner-once /tmp/sftp-owner-once/clouddrive.proto
+          cat >/tmp/sftp-owner-once/verify.py <<'PY'
+          import os,ssl,http.client,struct,hashlib,re,json,collections,sys
+          from google.protobuf import message_factory
+          import clouddrive_pb2 as pb
+          TOKEN=os.environ["CD_TOKEN"]; S=pb.DESCRIPTOR.services_by_name["CloudDriveFileSrv"]
+          def cls(d):return message_factory.GetMessageClass(d)
+          def digest(s):return hashlib.sha256(str(s).encode()).hexdigest()[:12]
+          def name(m,f):
+           d=m.DESCRIPTOR.fields_by_name[f]; v=getattr(m,f)
+           return d.enum_type.values_by_number[int(v)].name if d.type==14 else str(v)
+          def cat(v):
+           s=str(v).lower()
+           if re.search(r"sync.owner|sync_owner|other.*instance|another.*instance|another.*sync|another.*backup|different.*instance|另一个.*(实例|同步)|其他.*(实例|同步)|占用|owner marker|ownership|sync.*owner|managed by",s):return "OWNER_CONFLICT"
+           if re.search(r"permission|forbidden|denied|认证|权限|401|403",s):return "PERMISSION"
+           if re.search(r"timeout|timed out|connection|网络|超时",s):return "NETWORK"
+           if re.search(r"not found|no such|不存在|未找到",s):return "NOT_FOUND"
+           if re.search(r"conflict|冲突|same file|duplicate",s):return "FILE_CONFLICT"
+           if re.search(r"error|failed|失败|错误",s):return "OTHER_FAILURE"
+           return "OTHER"
+          def rpc(method,req=None):
+           d=S.methods_by_name[method]; req=req or cls(d.input_type)(); dat=req.SerializeToString()
+           c=http.client.HTTPSConnection("cd.evren.cn",443,timeout=50,context=ssl.create_default_context())
+           try:
+            c.request("POST","/clouddrive.CloudDriveFileSrv/"+method,b"\0"+struct.pack(">I",len(dat))+dat,{"content-type":"application/grpc-web+proto","accept":"application/grpc-web+proto","x-grpc-web":"1","origin":"https://cd.evren.cn","authorization":"Bearer "+TOKEN})
+            r=c.getresponse(); h={k.lower():v for k,v in r.getheaders()}; code=r.status; raw=r.read(9_000_001)
+           finally:c.close()
+           if len(raw)>9_000_000:raise RuntimeError(method+" oversized")
+           pos=0; trailers={};out=[]
+           while pos<len(raw):
+            if pos+5>len(raw):raise RuntimeError("short frame")
+            fl=raw[pos]; length=int.from_bytes(raw[pos+1:pos+5],"big");pos+=5
+            if pos+length>len(raw):raise RuntimeError("bad frame")
+            chunk=raw[pos:pos+length];pos+=length
+            if fl&0x80:
+             for line in chunk.decode(errors="replace").splitlines():
+              if ":" in line:
+               k,v=line.split(":",1);trailers[k.lower().strip()]=v.strip()
+            else:
+             if fl&1:raise RuntimeError("compressed frame")
+             x=cls(d.output_type)();x.ParseFromString(chunk);out.append(x)
+           grpc=trailers.get("grpc-status",h.get("grpc-status"))
+           print("RPC",method,"http",code,"grpc",grpc or "MISSING","messages",len(out),flush=True)
+           if code!=200 or grpc!="0":raise RuntimeError(method+": bad status "+str(code)+"/"+str(grpc))
+           return out
+          def under(path,root):
+           p=path.rstrip("/");r=root.rstrip("/")
+           return bool(r and (p==r or p.startswith(r+"/")))
+          def related(a,b):return under(a,b) or under(b,a)
+          def getfield(obj,key,default=None):return getattr(obj,key,default)
+          
+          
+          import time
+          def state():
+           a=rpc("BackupGetAll")[0].backups
+           return a
+          def ts(x):
+           try:return int(x.time.seconds)
+           except:return 0
+          storage=[a.path for r in rpc("GetAllCloudApis") for a in r.apis if (a.name.strip().lower()=="sftp" or a.path.rstrip("/").split("/")[-1].lower()=="sftp")]
+          if len(storage)!=1:raise RuntimeError("Not unique SFTP storage")
+          root=storage[0]
+          def target():
+           hits=[x for x in state() if x.backup.sourcePath==root]
+           if len(hits)!=1:raise RuntimeError("Target not unique")
+           return hits[0]
+          b=target()
+          if not (b.backup.isEnabled and name(b.backup,"syncMode")=="BackupTwoWay" and not b.backup.syncOwnerMarker
+                  and not b.backup.syncDeletionsTwoWay and not b.backup.twoWayHardDelete
+                  and name(b.backup,"fileDeleteRule")=="Keep" and b.heldDeletionGuards==0):
+           raise RuntimeError("Target settings no longer match safe repair preconditions")
+          def problems():
+           q=cls(S.methods_by_name["BackupGetSyncIssues"].input_type)();q.value=root
+           return [x for r in rpc("BackupGetSyncIssues",q) for x in r.issues]
+          def summarize(label,b):
+           errs=[e for e in b.errors if cat(e.message)=="OWNER_CONFLICT"]
+           issues=problems()
+           print(label,json.dumps({"state":name(b,"status"),"markerEnabled":b.backup.syncOwnerMarker,
+             "errorsListed":len(b.errors),"ownerErrorCount":len(errs),
+             "newestOwnerErrorSeconds":max((ts(x) for x in errs),default=0),
+             "openIssues":b.openSyncIssues,"issues": [{"id":i.id,"kind":name(i,"kind"),
+                     "replicaCorrect":i.replica==root,"createdSeconds":ts(i)} for i in issues][:10],
+             "scannerGeneration":getfield(b.syncStats,"generation",0)},ensure_ascii=False))
+           return issues, max((ts(x) for x in errs),default=0)
+          x,t0=summarize("SNAPSHOT_0",b)
+          time.sleep(22)
+          b1=target();y,t1=summarize("SNAPSHOT_1",b1)
+          if t1>t0:
+           print("ACTION","NO_DISMISS_NEW_OWNER_ERRORS","time_advanced",t1-t0)
+           sys.exit(2)
+          if not y:
+           print("ACTION","NO_REMAINING_ISSUES")
+          else:
+           bad=[i for i in y if not (name(i,"kind")=="SharedReplica" and cat(i.detail)=="OWNER_CONFLICT" and i.replica==root and not i.resolved)]
+           if bad or len(y)!=1:
+            print("ACTION","REQUIRES_MANUAL_REVIEW",len(y),len(bad))
+            sys.exit(2)
+           issue=y[0]
+           req=cls(S.methods_by_name["BackupResolveSyncIssue"].input_type)()
+           req.sourcePath=root
+           req.issueIds.append(issue.id)
+           req.action=S.methods_by_name["BackupResolveSyncIssue"].input_type.fields_by_name["action"].enum_type.values_by_name["Dismiss"].number
+           req.confirmed=False
+           responses=rpc("BackupResolveSyncIssue",req)
+           if not responses or not responses[0].success:
+            print("ACTION","DISMISS_REJECTED")
+            sys.exit(2)
+           print("ACTION","DISMISS_ACCEPTED",issue.id)
+           rest=problems()
+           print("AFTER_DISMISS","old_id_absent",all(i.id!=issue.id for i in rest),"remaining",len(rest))
+           if any(i.id==issue.id for i in rest):raise RuntimeError("Old owner issue remains")
+          time.sleep(12)
+          b2=target()
+          z,t2=summarize("SNAPSHOT_2",b2)
+          print("FINAL","owner_issue_present",any(name(i,"kind")=="SharedReplica" for i in z),
+                "new_owner_errors_since_dismiss",t2>t1,"marker_enabled",b2.backup.syncOwnerMarker)
+          if any(name(i,"kind")=="SharedReplica" for i in z) or t2>t1:
+           raise RuntimeError("Ownership issue reappeared or new owner error was emitted")
+          PY
+          PYTHONPATH=/tmp/sftp-owner-once python3 -u /tmp/sftp-owner-once/verify.py
