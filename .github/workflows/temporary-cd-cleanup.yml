@@ -1,0 +1,52 @@
+name: Temporary cleanup of CloudDrive diagnostic GitHub records
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary-cd-cleanup.yml'
+permissions:
+  contents: write
+  actions: write
+jobs:
+  cleanup:
+    if: github.repository == 'zhumiao-cloud/ddiittumap' && github.actor == 'zhumiao-cloud' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Remove previously completed one-shot runs and temporary branches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          set +x
+          for run in 38501665518 38501716837 38501832441 38501887320 38502090514 38502107391; do
+            artifact_ids="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/artifacts" --jq '.artifacts[].id' 2>/dev/null || true)"
+            for artifact in $artifact_ids; do
+              if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact}" >/dev/null 2>&1; then
+                echo "ARTIFACT_REMOVED ${run}"
+              else
+                echo "ARTIFACT_REMOVE_FAILED ${run}"
+              fi
+            done
+            if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/runs/${run}" >/dev/null 2>&1; then
+              echo "RUN_REMOVED ${run}"
+            else
+              echo "RUN_REMOVE_FAILED ${run}"
+            fi
+          done
+          for branch in \
+            sxy-macaque-check-20261013 \
+            sxy-macaque-run-20261011 \
+            sxy-macaque-status-20261011 \
+            temporary-123pan-cdn-diagnose-20261013 \
+            temporary-sxy-arc-direct-resume-20261013 \
+            temporary-sxy-arc-progress-20261013; do
+            if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" >/dev/null 2>&1; then
+              echo "BRANCH_REMOVED ${branch}"
+            else
+              echo "BRANCH_REMOVE_FAILED ${branch}"
+            fi
+          done
+          echo "REMAINING_BRANCHES"
+          gh api "repos/${GITHUB_REPOSITORY}/branches?per_page=100" --jq '.[].name'
+          echo "CLEANUP_FINISHED"
