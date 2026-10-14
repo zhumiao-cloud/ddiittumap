@@ -17,4 +17,7 @@ jobs:
           set -euo pipefail
           set +x
           curl -fsSL --max-time 35 https://www.clouddrive2.com/api/clouddrive.proto -o /tmp/clouddrive.proto
-          grep -n -A14 -B6 -E 'rpc Backup(GetSyncIssues|ResolveSyncIssue|ResetSyncIndex|RestartWalkingThrough)|enum BackupSyncIssue|enum BackupSyncIssueResolution|heldDeletionGuards|message BackupSyncIssue' /tmp/clouddrive.proto | head -240
+          echo '===== ISSUE AND RESOLUTION STRUCTS ====='
+          sed -n '2550,2571p;2619,2685p' /tmp/clouddrive.proto
+          echo '===== BACKUP RPC ====='
+          sed -n '511,545p' /tmp/clouddrive.proto
