@@ -121,14 +121,41 @@ jobs:
               if any(k in n.lower() for k in ("backup","ignore","confirm","conflict")):
                   print("SCHEMA",n,"INPUT",json.dumps(fields(m.input_type),ensure_ascii=False),
                         "OUTPUT",json.dumps(fields(m.output_type),ensure_ascii=False)[:3500])
-          for method in ("BackupGetAll","GetAllTasksCount"):
-              if method not in SVC.methods_by_name: continue
-              try:
-                  items=rpc(method)
-                  for i,msg in enumerate(items):
-                      print("DATA",method,"message",i,json.dumps(summarize(msg),ensure_ascii=False)[:13500])
-              except Exception as e:
-                  print("FAILED",method,type(e).__name__,str(e)[:160])
-                  if method=="BackupGetAll": sys.exit(2)
-          PY
-          PYTHONPATH=/tmp/cd-once python3 /tmp/cd-once/audit.py
+          print("ISSUE_SCHEMA",json.dumps(fields(SVC.methods_by_name["BackupGetSyncIssues"].output_type.fields_by_name["issues"].message_type),ensure_ascii=False))
+          actiontype=SVC.methods_by_name["BackupResolveSyncIssue"].input_type.fields_by_name["action"].enum_type
+          print("RESOLUTION_ACTIONS",json.dumps([(v.name,v.number) for v in actiontype.values],ensure_ascii=False))
+          try:
+              statuses=rpc("BackupGetAll")
+              backs=list(statuses[0].backups)
+              print("BACKUP_COUNT",len(backs))
+              for i,b in enumerate(backs,1):
+                  src=b.backup.sourcePath
+                  errors=list(b.errors)
+                  ecount=collections.Counter(classify(getattr(e,"message","")) for e in errors)
+                  d={"index":i,"source_hash":h(src),"status":safe_value(b.DESCRIPTOR.fields_by_name["status"],b.status),
+                    "enabled":b.backup.isEnabled,"dest_count":len(b.backup.destinations),
+                    "open_issue_count":b.openSyncIssues,"listed_error_count":len(errors),
+                    "error_classes":dict(ecount)}
+                  print("BACKUP",json.dumps(d,ensure_ascii=False))
+                  req=cls(SVC.methods_by_name["BackupGetSyncIssues"].input_type)()
+                  req.value=src
+                  try:
+                      replies=rpc("BackupGetSyncIssues",req)
+                      allissues=[item for reply in replies for item in reply.issues]
+                      sigcounts=collections.Counter()
+                      cats=collections.Counter()
+                      examples={}
+                      for issue in allissues:
+                          sig=tuple((f.name,str(safe_value(f,v))) for f,v in issue.ListFields() if f.type==f.TYPE_ENUM)
+                          s=str(sig)
+                          sigcounts[s]+=1
+                          for f,v in issue.ListFields():
+                              if f.type==f.TYPE_STRING and any(k in f.name.lower() for k in ("message","reason","detail","error")): cats[classify(str(v))]+=1
+                          if s not in examples: examples[s]=summarize(issue)
+                      print("ISSUES",json.dumps({"index":i,"count":len(allissues),"by_enum":dict(sigcounts),
+                           "message_classes":dict(cats),"examples_by_enum":list(examples.values())[:8]},ensure_ascii=False)[:14000])
+                  except Exception as exc:
+                      print("ISSUE_FETCH_FAILED",i,type(exc).__name__,str(exc)[:150])
+          except Exception as exc:
+              print("BACKUP_FETCH_FAILED",type(exc).__name__,str(exc)[:160])
+              sys.exit(2)
