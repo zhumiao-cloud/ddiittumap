@@ -87,7 +87,7 @@ jobs:
           print("BACKUP_TOTAL",len(b_all))
           reqdesc=S.methods_by_name["BackupResolveSyncIssue"].input_type
           print("RESOLVE_ENUMS",json.dumps([x.name for x in reqdesc.fields_by_name["action"].enum_type.values]))
-          print("RESOLVE_FIELDS",json.dumps([(f.name,str(f.type),f.label==f.LABEL_REPEATED) for f in reqdesc.fields]))
+          print("RESOLVE_FIELDS",json.dumps([(f.name,str(f.type),f.is_repeated) for f in reqdesc.fields]))
           for idx,b in enumerate(b_all):
            root=b.backup.sourcePath
            q=cls(S.methods_by_name["BackupGetSyncIssues"].input_type)()
@@ -97,7 +97,7 @@ jobs:
            resolved=sum(1 for i in issues if i.resolved)
            detail=collections.Counter(cat(i.detail) for i in issues)
            print("BACKUP_AUDIT",json.dumps({
-            "index":idx+1,"id":b.backup.id,"sourceHash":hash_path(root),
+            "index":idx+1,"id":idx+1,"sourceHash":hash_path(root),
             "enabled":b.backup.isEnabled,"state":enum_name(b,"status"),
             "openCount":b.openSyncIssues,"returned":len(issues),"distinctIds":len(set(i.id for i in issues)),
             "resolvedReturned":resolved,"types":dict(typ),"detailClasses":dict(detail),
