@@ -110,6 +110,8 @@ jobs:
           action=s.fields_by_name["action"].enum_type.values_by_name["Dismiss"].number
           paths=check()
           processedTotal=0
+          confirmedResponses=0
+          checkedAfterFramingError=0
           for sweep in (1,2,3):
            changes=0
            print("SWEEP_START",sweep,flush=True)
@@ -118,17 +120,27 @@ jobs:
             idset=list(dict.fromkeys(int(x.id) for x in problem))
             if len(idset)!=len(problem):raise RuntimeError("Duplicate issues in response")
             print("BACKUP_BEFORE",json.dumps({"slot":idx+1,"retrieved":len(idset),"kindCounts":dict(collections.Counter(en(x,"kind") for x in problem))}),flush=True)
-            for off in range(0,len(idset),100):
-             sub=idset[off:off+100]
+            for off in range(0,len(idset),25):
+             sub=idset[off:off+25]
              if processedTotal+len(sub)>5200:raise RuntimeError("Bounded action budget exceeded")
              req=cls(s)()
              req.sourcePath=path
              req.issueIds.extend(sub)
              req.action=action
              req.confirmed=False
-             out=rpc("BackupResolveSyncIssue",req)
-             if len(out)!=1 or not out[0].success:
-              raise RuntimeError("Dismiss call did not confirm success; will not blindly replay")
+             try:
+              out=rpc("BackupResolveSyncIssue",req)
+              if len(out)!=1 or not out[0].success:
+               raise RuntimeError("Dismiss rejected or unconfirmed; no blind replay")
+              confirmedResponses+=len(sub)
+             except RuntimeError as e:
+              if not any(k in str(e).lower() for k in ("bad frame","short frame")):raise
+              print("MUTATION_RESPONSE_INCOMPLETE_READBACK",json.dumps({"slot":idx+1,"n":len(sub)}),flush=True)
+              visible={int(x.id) for x in issues(path)}
+              if any(i in visible for i in sub):
+               raise RuntimeError("Uncertain IDs remain; stopped without replay")
+              checkedAfterFramingError+=len(sub)
+              print("MUTATION_READBACK_OLD_IDS_ABSENT",len(sub),flush=True)
              processedTotal+=len(sub)
              changes+=len(sub)
             after=issues(path)
@@ -143,7 +155,7 @@ jobs:
            b=next(x for x in final if x.backup.sourcePath==path)
            current=issues(path)
            print("FINAL_SYNC",json.dumps({"slot":idx+1,"enabled":b.backup.isEnabled,"state":en(b,"status"),"serverCount":b.openSyncIssues,"returnedOpen":len(current),"kinds":dict(collections.Counter(en(x,"kind") for x in current))}),flush=True)
-          print("FINAL_ACCEPTED",processedTotal,flush=True)
+          print("FINAL_ACCEPTED",processedTotal,"responseConfirmed",confirmedResponses,"verifiedAfterPartialFrame",checkedAfterFramingError,flush=True)
           
           PY
           PYTHONPATH=/tmp/cd-dism python3 -u /tmp/cd-dism/dismiss.py
