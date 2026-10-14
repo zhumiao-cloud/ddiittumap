@@ -81,12 +81,21 @@ jobs:
           def en(m,k):
            d=m.DESCRIPTOR.fields_by_name[k]
            return d.enum_type.values_by_number[int(getattr(m,k))].name
+          def read_rpc(method,req=None):
+           for attempt in (1,2,3):
+            try:return rpc(method,req)
+            except (RuntimeError,TimeoutError,ConnectionError,OSError,ValueError) as e:
+             kind=str(e).lower()
+             if "bad status" in kind or "16"==kind.strip():raise
+             print("READ_ONLY_RETRY",method,attempt,type(e).__name__,flush=True)
+             if attempt==3:raise
+             time.sleep(attempt*2)
           def backups():
-           return [x for r in rpc("BackupGetAll") for x in r.backups]
+           return [x for r in read_rpc("BackupGetAll") for x in r.backups]
           def issues(path):
            q=cls(S.methods_by_name["BackupGetSyncIssues"].input_type)()
            q.value=path
-           return [x for r in rpc("BackupGetSyncIssues",q) for x in r.issues if not x.resolved]
+           return [x for r in read_rpc("BackupGetSyncIssues",q) for x in r.issues if not x.resolved]
           def check():
            state=backups()
            paths=[b.backup.sourcePath for b in state]
