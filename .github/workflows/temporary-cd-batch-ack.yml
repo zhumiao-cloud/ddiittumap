@@ -1,4 +1,5 @@
 name: Temporary CloudDrive batch acknowledge notices
+# incremental second pass after live scan repopulated issues
 on:
   push:
     paths: ['.github/workflows/temporary-cd-batch-ack.yml']
