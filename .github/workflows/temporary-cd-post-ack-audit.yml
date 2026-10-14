@@ -72,5 +72,24 @@ jobs:
                       fn=i.DESCRIPTOR.fields_by_name["kind"];kind=fn.enum_type.values_by_number[i.kind].name
                       counts[kind]=counts.get(kind,0)+1
                   print("OPEN_ISSUE_KINDS",j,json.dumps(counts))
+          
+          # Dismiss exactly one newly emerged NotComparable warning from backup #2.
+          latest=rpc("BackupGetAll")[0].backups
+          if len(latest)==6 and latest[1].openSyncIssues==1:
+              rq=cls(svc.methods_by_name["BackupGetSyncIssues"].input_type)()
+              rq.value=latest[1].backup.sourcePath
+              entries=[issue for response in rpc("BackupGetSyncIssues",rq) for issue in response.issues if not issue.resolved]
+              if len(entries)==1 and entries[0].id and entries[0].DESCRIPTOR.fields_by_name["kind"].enum_type.values_by_number[entries[0].kind].name=="NotComparable":
+                  rr=cls(svc.methods_by_name["BackupResolveSyncIssue"].input_type)()
+                  rr.sourcePath=latest[1].backup.sourcePath
+                  rr.issueIds.append(entries[0].id)
+                  rr.action=0 # Dismiss only; does not request modifying any file
+                  rr.confirmed=False
+                  ans=rpc("BackupResolveSyncIssue",rr)
+                  print("FINAL_SINGLE_DISMISS_ACCEPTED",bool(len(ans)==1 and ans[0].success),flush=True)
+                  final=rpc("BackupGetAll")[0].backups
+                  print("FINAL_COUNTS_AFTER_SINGLE",json.dumps([int(x.openSyncIssues) for x in final]),flush=True)
+              else: print("SINGLE_DISMISS_SKIPPED issue not exactly one NotComparable",flush=True)
+          else: print("SINGLE_DISMISS_SKIPPED no exactly-one backup-two open issue",flush=True)
           PY
           PYTHONPATH=/tmp/cd-once python3 /tmp/cd-once/post.py
