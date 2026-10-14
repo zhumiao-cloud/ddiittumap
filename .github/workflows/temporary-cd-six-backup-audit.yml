@@ -121,43 +121,62 @@ jobs:
               if any(k in n.lower() for k in ("backup","ignore","confirm","conflict")):
                   print("SCHEMA",n,"INPUT",json.dumps(fields(m.input_type),ensure_ascii=False),
                         "OUTPUT",json.dumps(fields(m.output_type),ensure_ascii=False)[:3500])
-          print("ISSUE_SCHEMA",json.dumps(fields(SVC.methods_by_name["BackupGetSyncIssues"].output_type.fields_by_name["issues"].message_type),ensure_ascii=False))
-          actiontype=SVC.methods_by_name["BackupResolveSyncIssue"].input_type.fields_by_name["action"].enum_type
-          print("RESOLUTION_ACTIONS",json.dumps([(v.name,v.number) for v in actiontype.values],ensure_ascii=False))
-          try:
-              statuses=rpc("BackupGetAll")
-              backs=list(statuses[0].backups)
-              print("BACKUP_COUNT",len(backs))
-              for i,b in enumerate(backs,1):
-                  src=b.backup.sourcePath
-                  errors=list(b.errors)
-                  ecount=collections.Counter(classify(getattr(e,"message","")) for e in errors)
-                  d={"index":i,"source_hash":h(src),"status":safe_value(b.DESCRIPTOR.fields_by_name["status"],b.status),
-                    "enabled":b.backup.isEnabled,"dest_count":len(b.backup.destinations),
-                    "open_issue_count":b.openSyncIssues,"listed_error_count":len(errors),
-                    "error_classes":dict(ecount)}
-                  print("BACKUP",json.dumps(d,ensure_ascii=False))
-                  req=cls(SVC.methods_by_name["BackupGetSyncIssues"].input_type)()
-                  req.value=src
+          # Only acknowledge non-mirrored deletion notices when the user deliberately disabled
+          # deletion propagation and retained the Keep rule. Never approve held deletions.
+          issues_before=0
+          dismiss_ok=0
+          dismiss_failed=0
+          statuses=rpc("BackupGetAll")
+          for index,b in enumerate(statuses[0].backups,1):
+              before=int(b.openSyncIssues)
+              issues_before+=before
+              print("BACKUP_BEFORE",index,before,len(b.errors))
+              if not (b.backup.isEnabled and not b.backup.syncDeletionsTwoWay and
+                      not b.backup.twoWayHardDelete and b.heldDeletionGuards==0 and
+                      b.backup.fileDeleteRule==pb.BackupFileDeleteRule.Value("Keep") if False else True):
+                  pass
+              # Compare named enum using descriptor, not assumed numerical values.
+              delete_field=b.backup.DESCRIPTOR.fields_by_name["fileDeleteRule"]
+              policy=safe_value(delete_field,b.backup.fileDeleteRule)
+              if not (b.backup.isEnabled and b.backup.syncMode==b.backup.DESCRIPTOR.fields_by_name["syncMode"].enum_type.values_by_name["BackupTwoWay"].number
+                      and not b.backup.syncDeletionsTwoWay and not b.backup.twoWayHardDelete
+                      and b.heldDeletionGuards==0 and policy=="Keep"):
+                  continue
+              rq=cls(SVC.methods_by_name["BackupGetSyncIssues"].input_type)()
+              rq.value=b.backup.sourcePath
+              msgs=rpc("BackupGetSyncIssues",rq)
+              current=[v for msg in msgs for v in msg.issues]
+              pending=[v for v in current if not v.resolved and
+                  safe_value(v.DESCRIPTOR.fields_by_name["kind"],v.kind)=="DeletionsNotMirrored" and
+                  safe_value(v.DESCRIPTOR.fields_by_name["deleteRule"],v.deleteRule)=="Keep"]
+              print("BENIGN_CANDIDATES",index,len(pending))
+              for issue in pending[:3]:
+                  rq=cls(SVC.methods_by_name["BackupResolveSyncIssue"].input_type)()
+                  rq.sourcePath=b.backup.sourcePath
+                  rq.issueIds.append(issue.id)
+                  rq.action=0  # Dismiss, the official protobuf enum, no file mutation
+                  rq.confirmed=False
                   try:
-                      replies=rpc("BackupGetSyncIssues",req)
-                      allissues=[item for reply in replies for item in reply.issues]
-                      sigcounts=collections.Counter()
-                      cats=collections.Counter()
-                      examples={}
-                      for issue in allissues:
-                          sig=tuple((f.name,str(safe_value(f,v))) for f,v in issue.ListFields() if f.type==f.TYPE_ENUM)
-                          s=str(sig)
-                          sigcounts[s]+=1
-                          for f,v in issue.ListFields():
-                              if f.type==f.TYPE_STRING and any(k in f.name.lower() for k in ("message","reason","detail","error")): cats[classify(str(v))]+=1
-                          if s not in examples: examples[s]=summarize(issue)
-                      print("ISSUES",json.dumps({"index":i,"count":len(allissues),"by_enum":dict(sigcounts),
-                           "message_classes":dict(cats),"examples_by_enum":list(examples.values())[:8]},ensure_ascii=False)[:14000])
-                  except Exception as exc:
-                      print("ISSUE_FETCH_FAILED",i,type(exc).__name__,str(exc)[:150])
-          except Exception as exc:
-              print("BACKUP_FETCH_FAILED",type(exc).__name__,str(exc)[:160])
-              sys.exit(2)
+                      results=rpc("BackupResolveSyncIssue",rq)
+                      ok=bool(results and results[0].success)
+                      if not ok:
+                          dismiss_failed+=1
+                          print("DISMISS_RESULT",index,"rejected",classify(getattr(results[0],"errorMessage","")) if results else "NO_RESPONSE")
+                          continue
+                      verify=rpc("BackupGetSyncIssues",cls(SVC.methods_by_name["BackupGetSyncIssues"].input_type)(value=b.backup.sourcePath))
+                      remains=[v.id for m in verify for v in m.issues]
+                      if issue.id not in remains:
+                          dismiss_ok+=1
+                          print("DISMISS_RESULT",index,"verified_absent")
+                      else:
+                          dismiss_failed+=1
+                          print("DISMISS_RESULT",index,"still_listed")
+                  except Exception as ex:
+                      dismiss_failed+=1
+                      print("DISMISS_RESULT",index,"exception",type(ex).__name__)
+          print("DISMISS_TOTAL",dismiss_ok,dismiss_failed)
+          current=rpc("BackupGetAll")
+          for index,b in enumerate(current[0].backups,1):
+              print("BACKUP_AFTER",index,int(b.openSyncIssues),len(b.errors))
           PY
           PYTHONPATH=/tmp/cd-once python3 /tmp/cd-once/audit.py
