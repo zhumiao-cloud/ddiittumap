@@ -107,7 +107,7 @@ jobs:
             issues=get_issues(root)
             uniq=list(dict.fromkeys(int(i.id) for i in issues))
             if len(uniq)>300:raise RuntimeError("Unexpected new issue surge; stopping follow-up")
-  if len(uniq)!=len(issues):
+            if len(uniq)!=len(issues):
              raise RuntimeError("Duplicate issue IDs in one backup")
             print("BACKUP_BEFORE",json.dumps({"backup":idx+1,"hash":h(root),"outstanding":len(uniq),
              "types":dict(collections.Counter(enum_name(i,"kind") for i in issues))},ensure_ascii=False),flush=True)
