@@ -131,10 +131,6 @@ jobs:
               before=int(b.openSyncIssues)
               issues_before+=before
               print("BACKUP_BEFORE",index,before,len(b.errors))
-              if not (b.backup.isEnabled and not b.backup.syncDeletionsTwoWay and
-                      not b.backup.twoWayHardDelete and b.heldDeletionGuards==0 and
-                      b.backup.fileDeleteRule==pb.BackupFileDeleteRule.Value("Keep") if False else True):
-                  pass
               # Compare named enum using descriptor, not assumed numerical values.
               delete_field=b.backup.DESCRIPTOR.fields_by_name["fileDeleteRule"]
               policy=safe_value(delete_field,b.backup.fileDeleteRule)
