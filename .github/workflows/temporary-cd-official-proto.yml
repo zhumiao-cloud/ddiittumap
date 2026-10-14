@@ -1,0 +1,20 @@
+name: Temporary CloudDrive official API schema inspection
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary-cd-official-proto.yml'
+permissions:
+  contents: read
+jobs:
+  inspect:
+    if: github.repository == 'zhumiao-cloud/ddiittumap'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Inspect official CloudDrive backup protection RPC declarations
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          curl -fsSL --max-time 35 https://www.clouddrive2.com/api/clouddrive.proto -o /tmp/clouddrive.proto
+          grep -n -A14 -B6 -E 'rpc Backup(GetSyncIssues|ResolveSyncIssue|ResetSyncIndex|RestartWalkingThrough)|enum BackupSyncIssue|enum BackupSyncIssueResolution|heldDeletionGuards|message BackupSyncIssue' /tmp/clouddrive.proto | head -240
