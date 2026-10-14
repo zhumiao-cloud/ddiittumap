@@ -129,7 +129,7 @@ jobs:
              print("FATAL_UPLOAD_SAMPLE",json.dumps({"total":q.totalCount,"filtered":q.totalCountFiltered,"returned":len(q.uploadFiles),
               "errorTypes":dict(collections.Counter(classify(x.errorMessage) for x in q.uploadFiles)),
               "entryFieldNames":[f.name for f in q.uploadFiles[0].DESCRIPTOR.fields] if q.uploadFiles else []}))
-           print("FATAL_UPLOAD_DESTS",json.dumps({"categories":dict(collections.Counter(classify_path(x.destPath) for x in q.uploadFiles)),"errorsByDest":dict(collections.Counter(classify_path(x.destPath)+":"+classify(x.errorMessage) for x in q.uploadFiles))},ensure_ascii=False))
+             print("FATAL_UPLOAD_DESTS",json.dumps({"categories":dict(collections.Counter(classify_path(x.destPath) for x in q.uploadFiles)),"errorsByDest":dict(collections.Counter(classify_path(x.destPath)+":"+classify(x.errorMessage) for x in q.uploadFiles))},ensure_ascii=False))
            except Exception as e:print("FATAL_FILTER_FAILED",type(e).__name__)
           d=rpc("GetDownloadFileList")
           for z in d:
