@@ -1,0 +1,42 @@
+name: One-shot cleanup CloudDrive October 15 runs
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary-cd-20261015-cleanup.yml'
+permissions:
+  contents: read
+  actions: write
+jobs:
+  cleanup:
+    if: github.repository == 'zhumiao-cloud/ddiittumap' && github.actor == 'zhumiao-cloud' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - name: Remove only completed runs and artifacts of this CloudDrive incident
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          set +x
+          for id in 38607392440 38607732051 38607912111 38607989121 38608165184 38608369810 38608441288 38608691783; do
+            status="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${id}" --jq .status 2>/dev/null || true)"
+            if [ "$status" != "completed" ]; then
+              echo "SKIP_NOT_COMPLETED ${id}"
+              continue
+            fi
+            artifacts="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/artifacts" --jq '.artifacts[].id' 2>/dev/null || true)"
+            for artifact in $artifacts; do
+              if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact}" >/dev/null 2>&1; then
+                echo "ARTIFACT_REMOVED"
+              else
+                echo "ARTIFACT_REMOVE_FAILED"
+              fi
+            done
+            if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/runs/${id}" >/dev/null 2>&1; then
+              echo "RUN_REMOVED ${id}"
+            else
+              echo "RUN_REMOVE_FAILED ${id}"
+            fi
+          done
+          echo "CLEANUP_FINISHED"
