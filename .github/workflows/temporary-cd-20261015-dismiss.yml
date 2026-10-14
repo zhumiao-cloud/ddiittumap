@@ -1,0 +1,140 @@
+name: Temporary CloudDrive batch dismiss sync issues
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary-cd-20261015-dismiss.yml'
+permissions:
+  contents: read
+jobs:
+  dismiss:
+    if: github.repository == 'zhumiao-cloud/ddiittumap' && github.actor == 'zhumiao-cloud' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Bounded Dismiss-only of enumerated backup synchronization issues
+        shell: bash
+        env:
+          CD_TOKEN: ${{ secrets.CD_API_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "$CD_TOKEN"
+          echo "::add-mask::$CD_TOKEN"
+          umask 077
+          trap 'rm -rf /tmp/cd-dism' EXIT
+          mkdir -p /tmp/cd-dism
+          curl -fsSL --max-time 35 https://www.clouddrive2.com/api/clouddrive.proto -o /tmp/cd-dism/clouddrive.proto
+          python3 -m pip install --disable-pip-version-check -q protobuf grpcio-tools
+          python3 -m grpc_tools.protoc -I/tmp/cd-dism --python_out=/tmp/cd-dism /tmp/cd-dism/clouddrive.proto
+          cat >/tmp/cd-dism/dismiss.py <<'PY'
+          import os,ssl,http.client,struct,hashlib,re,json,collections,sys
+          from google.protobuf import message_factory
+          import clouddrive_pb2 as pb
+          TOKEN=os.environ["CD_TOKEN"]; S=pb.DESCRIPTOR.services_by_name["CloudDriveFileSrv"]
+          def cls(d):return message_factory.GetMessageClass(d)
+          def digest(s):return hashlib.sha256(str(s).encode()).hexdigest()[:12]
+          def name(m,f):
+           d=m.DESCRIPTOR.fields_by_name[f]; v=getattr(m,f)
+           return d.enum_type.values_by_number[int(v)].name if d.type==14 else str(v)
+          def cat(v):
+           s=str(v).lower()
+           if re.search(r"sync.owner|sync_owner|other.*instance|another.*instance|another.*sync|another.*backup|different.*instance|另一个.*(实例|同步)|其他.*(实例|同步)|占用|owner marker|ownership|sync.*owner|managed by",s):return "OWNER_CONFLICT"
+           if re.search(r"permission|forbidden|denied|认证|权限|401|403",s):return "PERMISSION"
+           if re.search(r"timeout|timed out|connection|网络|超时",s):return "NETWORK"
+           if re.search(r"not found|no such|不存在|未找到",s):return "NOT_FOUND"
+           if re.search(r"conflict|冲突|same file|duplicate",s):return "FILE_CONFLICT"
+           if re.search(r"error|failed|失败|错误",s):return "OTHER_FAILURE"
+           return "OTHER"
+          def rpc(method,req=None):
+           d=S.methods_by_name[method]; req=req or cls(d.input_type)(); dat=req.SerializeToString()
+           c=http.client.HTTPSConnection("cd.evren.cn",443,timeout=50,context=ssl.create_default_context())
+           try:
+            c.request("POST","/clouddrive.CloudDriveFileSrv/"+method,b"\0"+struct.pack(">I",len(dat))+dat,{"content-type":"application/grpc-web+proto","accept":"application/grpc-web+proto","x-grpc-web":"1","origin":"https://cd.evren.cn","authorization":"Bearer "+TOKEN})
+            r=c.getresponse(); h={k.lower():v for k,v in r.getheaders()}; code=r.status; raw=r.read(9_000_001)
+           finally:c.close()
+           if len(raw)>9_000_000:raise RuntimeError(method+" oversized")
+           pos=0; trailers={};out=[]
+           while pos<len(raw):
+            if pos+5>len(raw):raise RuntimeError("short frame")
+            fl=raw[pos]; length=int.from_bytes(raw[pos+1:pos+5],"big");pos+=5
+            if pos+length>len(raw):raise RuntimeError("bad frame")
+            chunk=raw[pos:pos+length];pos+=length
+            if fl&0x80:
+             for line in chunk.decode(errors="replace").splitlines():
+              if ":" in line:
+               k,v=line.split(":",1);trailers[k.lower().strip()]=v.strip()
+            else:
+             if fl&1:raise RuntimeError("compressed frame")
+             x=cls(d.output_type)();x.ParseFromString(chunk);out.append(x)
+           grpc=trailers.get("grpc-status",h.get("grpc-status"))
+           print("RPC",method,"http",code,"grpc",grpc or "MISSING","messages",len(out),flush=True)
+           if code!=200 or grpc!="0":raise RuntimeError(method+": bad status "+str(code)+"/"+str(grpc))
+           return out
+          def under(path,root):
+           p=path.rstrip("/");r=root.rstrip("/")
+           return bool(r and (p==r or p.startswith(r+"/")))
+          def related(a,b):return under(a,b) or under(b,a)
+          def getfield(obj,key,default=None):return getattr(obj,key,default)
+          
+          
+          import time,json,collections
+          def en(m,k):
+           d=m.DESCRIPTOR.fields_by_name[k]
+           return d.enum_type.values_by_number[int(getattr(m,k))].name
+          def backups():
+           return [x for r in rpc("BackupGetAll") for x in r.backups]
+          def issues(path):
+           q=cls(S.methods_by_name["BackupGetSyncIssues"].input_type)()
+           q.value=path
+           return [x for r in rpc("BackupGetSyncIssues",q) for x in r.issues if not x.resolved]
+          def check():
+           state=backups()
+           paths=[b.backup.sourcePath for b in state]
+           if len(paths)!=7 or any(not p for p in paths) or len(paths)!=len(set(paths)):
+            raise RuntimeError("Unexpected backup list; no mutations allowed")
+           if any(not b.backup.isEnabled for b in state):
+            raise RuntimeError("One or more backups disabled; fail safe before dismissal")
+           return paths
+          s=S.methods_by_name["BackupResolveSyncIssue"].input_type
+          if "Dismiss" not in s.fields_by_name["action"].enum_type.values_by_name:
+           raise RuntimeError("Dismiss unsupported")
+          action=s.fields_by_name["action"].enum_type.values_by_name["Dismiss"].number
+          paths=check()
+          processedTotal=0
+          for sweep in (1,2,3):
+           changes=0
+           print("SWEEP_START",sweep,flush=True)
+           for idx,path in enumerate(paths):
+            problem=issues(path)
+            idset=list(dict.fromkeys(int(x.id) for x in problem))
+            if len(idset)!=len(problem):raise RuntimeError("Duplicate issues in response")
+            print("BACKUP_BEFORE",json.dumps({"slot":idx+1,"retrieved":len(idset),"kindCounts":dict(collections.Counter(en(x,"kind") for x in problem))}),flush=True)
+            for off in range(0,len(idset),100):
+             sub=idset[off:off+100]
+             if processedTotal+len(sub)>5200:raise RuntimeError("Bounded action budget exceeded")
+             req=cls(s)()
+             req.sourcePath=path
+             req.issueIds.extend(sub)
+             req.action=action
+             req.confirmed=False
+             out=rpc("BackupResolveSyncIssue",req)
+             if len(out)!=1 or not out[0].success:
+              raise RuntimeError("Dismiss call did not confirm success; will not blindly replay")
+             processedTotal+=len(sub)
+             changes+=len(sub)
+            after=issues(path)
+            oldStill=len(set(idset)&{int(x.id) for x in after})
+            print("BACKUP_AFTER",json.dumps({"slot":idx+1,"accepted":len(idset),"oldStill":oldStill,"retrievedNow":len(after)}),flush=True)
+            if oldStill:raise RuntimeError("Old issue IDs remain despite Dismiss accepted")
+           print("SWEEP_DONE",json.dumps({"sweep":sweep,"accepted":changes,"totalAccepted":processedTotal}),flush=True)
+           if sweep!=3:time.sleep(4)
+          time.sleep(4)
+          final=backups()
+          for idx,path in enumerate(paths):
+           b=next(x for x in final if x.backup.sourcePath==path)
+           current=issues(path)
+           print("FINAL_SYNC",json.dumps({"slot":idx+1,"enabled":b.backup.isEnabled,"state":en(b,"status"),"serverCount":b.openSyncIssues,"returnedOpen":len(current),"kinds":dict(collections.Counter(en(x,"kind") for x in current))}),flush=True)
+          print("FINAL_ACCEPTED",processedTotal,flush=True)
+          
+          PY
+          PYTHONPATH=/tmp/cd-dism python3 -u /tmp/cd-dism/dismiss.py
