@@ -1,0 +1,117 @@
+name: One-time targeted SFTP directory cache refresh
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary-cd-sftp-refresh.yml'
+permissions:
+  contents: read
+jobs:
+  refresh:
+    if: github.repository == 'zhumiao-cloud/ddiittumap' && github.event_name == 'push' && github.actor == 'zhumiao-cloud'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Refresh only SFTP root cache and verify directory access
+        shell: bash
+        env:
+          CD_TOKEN: ${{ secrets.CD_API_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "$CD_TOKEN"
+          echo "::add-mask::$CD_TOKEN"
+          umask 077
+          trap 'rm -rf /tmp/cd-sftp-refresh' EXIT
+          mkdir -p /tmp/cd-sftp-refresh
+          curl -fsSL --max-time 35 https://www.clouddrive2.com/api/clouddrive.proto -o /tmp/cd-sftp-refresh/clouddrive.proto
+          python3 -m pip install --disable-pip-version-check -q protobuf grpcio-tools
+          python3 -m grpc_tools.protoc -I/tmp/cd-sftp-refresh --python_out=/tmp/cd-sftp-refresh /tmp/cd-sftp-refresh/clouddrive.proto
+          cat >/tmp/cd-sftp-refresh/main.py <<'PY'
+          import os,ssl,http.client,struct,json
+          from google.protobuf import message_factory
+          import clouddrive_pb2 as pb
+          TOKEN=os.environ["CD_TOKEN"]
+          svc=pb.DESCRIPTOR.services_by_name["CloudDriveFileSrv"]
+          def cls(d):return message_factory.GetMessageClass(d)
+          def rpc(name,req=None):
+              m=svc.methods_by_name[name]
+              req=req if req is not None else cls(m.input_type)()
+              rawreq=req.SerializeToString()
+              c=http.client.HTTPSConnection("cd.evren.cn",443,timeout=55,context=ssl.create_default_context())
+              try:
+                  c.request("POST","/clouddrive.CloudDriveFileSrv/"+name,b"\0"+struct.pack(">I",len(rawreq))+rawreq,{"content-type":"application/grpc-web+proto","accept":"application/grpc-web+proto","x-grpc-web":"1","origin":"https://cd.evren.cn","authorization":"Bearer "+TOKEN})
+                  r=c.getresponse();code=r.status;hdr={k.lower():v for k,v in r.getheaders()};raw=r.read(5000001)
+              finally:c.close()
+              if len(raw)>5000000:raise RuntimeError(name+" response too large")
+              out=[];tr={};pos=0
+              while pos<len(raw):
+                  if pos+5>len(raw):raise RuntimeError(name+" truncated frame")
+                  flag=raw[pos];length=int.from_bytes(raw[pos+1:pos+5],"big");pos+=5
+                  if pos+length>len(raw):raise RuntimeError(name+" invalid frame length")
+                  data=raw[pos:pos+length];pos+=length
+                  if flag&0x80:
+                      for line in data.decode("utf-8","replace").splitlines():
+                          if ":" in line:
+                              k,v=line.split(":",1);tr[k.strip().lower()]=v.strip()
+                  else:
+                      if flag&1:raise RuntimeError(name+" unexpected compressed frame")
+                      o=cls(m.output_type)();o.ParseFromString(data);out.append(o)
+              status=tr.get("grpc-status",hdr.get("grpc-status"))
+              print("RPC",name,"HTTP",code,"grpc",status,"responses",len(out),flush=True)
+              return (code,status,out)
+          def check(method,req=None):
+              h,g,out=rpc(method,req)
+              if h!=200 or g!="0":return (False,out)
+              return (True,out)
+          ok,result=check("GetAllCloudApis")
+          if not ok or len(result)!=1:raise RuntimeError("Cloud API listing not authorized")
+          matched=[api for api in result[0].apis if (api.name.strip().lower()=="sftp" or api.path.rstrip("/").split("/")[-1].strip().lower()=="sftp")]
+          print("SFTP_ENTRY_COUNT",len(matched),flush=True)
+          if len(matched)!=1:raise RuntimeError("SFTP target not uniquely identified; no changes made")
+          api=matched[0]
+          target=api.path
+          if not target or not target.startswith("/") or len(target)>2048:raise RuntimeError("Invalid SFTP target path")
+          print("SFTP_CLOUD_PROPERTIES","locked",bool(api.isLocked),"readonly",bool(api.readOnly),"cloud_event_listener",bool(api.isCloudEventListenerRunning),flush=True)
+          print("SELECTED_SCOPE","SFTP root only","path_redacted",flush=True)
+          if "GetApiTokenInfo" in svc.methods_by_name:
+              m=svc.methods_by_name["GetApiTokenInfo"]
+              q=cls(m.input_type)()
+              if "value" in m.input_type.fields_by_name:q.value=TOKEN
+              h,g,objs=rpc("GetApiTokenInfo",q)
+              if h==200 and g=="0":
+                  for obj in objs:
+                      for f,v in obj.ListFields():
+                          if "permissions" in f.name.lower() and f.message_type:
+                              print("TOKEN_PERMISSION_FIELDS",[(inner.name,str(val)) for inner,val in v.ListFields() if inner.type==8],flush=True)
+                          if "root" in f.name.lower() and f.type==9:
+                              print("TOKEN_SCOPE","SFTP_scope_match",target.startswith(str(v)),"root_is_slash",str(v)=="/",flush=True)
+          def list_sftp(force):
+              req=cls(svc.methods_by_name["GetSubFiles"].input_type)()
+              req.path=target
+              req.forceRefresh=force
+              h,g,objs=rpc("GetSubFiles",req)
+              if h==200 and g=="0":
+                  print("SFTP_READ","forced",force,"OK","objects",sum(len(x.subFiles) for x in objs),flush=True)
+                  return True
+              print("SFTP_READ","forced",force,"DENIED_OR_FAILED",g,flush=True)
+              return False
+          before=list_sftp(False)
+          if "ForceExpireDirCache" not in svc.methods_by_name:raise RuntimeError("Cache refresh not supported by proto")
+          req=cls(svc.methods_by_name["ForceExpireDirCache"].input_type)()
+          req.path=target
+          req.forceRefresh=True
+          h,g,answer=rpc("ForceExpireDirCache",req)
+          print("REFRESH_RPC","HTTP",h,"grpc",g,"output_fields",[[f.name for f,v in x.ListFields()] for x in answer],flush=True)
+          if h!=200 or g!="0":
+              print("REFRESH_RESULT","REJECTED","status",g,flush=True)
+              raise RuntimeError("Targeted SFTP cache refresh denied or failed")
+          for x in answer:
+              for f,v in x.ListFields():
+                  if f.name.lower() in ("success","issuccess") and v is False:
+                      raise RuntimeError("Targeted SFTP refresh returned unsuccessful result")
+          print("REFRESH_RESULT","ACCEPTED",flush=True)
+          after=list_sftp(True)
+          print("FINAL_STATE","verified" if after else "not_verified","pre_refresh_opened",before,flush=True)
+          if not after:raise RuntimeError("Cache refresh was accepted but SFTP directory access could not be validated")
+          PY
+          PYTHONPATH=/tmp/cd-sftp-refresh python3 -u /tmp/cd-sftp-refresh/main.py
