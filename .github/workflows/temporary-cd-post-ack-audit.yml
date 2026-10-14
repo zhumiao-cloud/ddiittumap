@@ -1,0 +1,76 @@
+name: One-time CloudDrive post-acknowledgement audit
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary-cd-post-ack-audit.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.repository == 'zhumiao-cloud/ddiittumap' && github.actor == 'zhumiao-cloud' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read remaining open issues without paths
+        shell: bash
+        env:
+          CD_TOKEN: ${{ secrets.CD_API_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "$CD_TOKEN"
+          echo "::add-mask::$CD_TOKEN"
+          umask 077
+          trap 'rm -rf /tmp/cd-once' EXIT
+          mkdir -p /tmp/cd-once
+          curl -fsSL --max-time 30 https://www.clouddrive2.com/api/clouddrive.proto -o /tmp/cd-once/clouddrive.proto
+          python3 -m pip install --disable-pip-version-check -q protobuf grpcio-tools
+          python3 -m grpc_tools.protoc -I/tmp/cd-once --python_out=/tmp/cd-once /tmp/cd-once/clouddrive.proto
+          cat > /tmp/cd-once/post.py <<'PY'
+          import os,ssl,http.client,struct,json
+          from google.protobuf import message_factory
+          import clouddrive_pb2 as pb
+          token=os.environ.get("CD_TOKEN","")
+          if not token:raise RuntimeError("CD_API_KEY missing")
+          svc=pb.DESCRIPTOR.services_by_name["CloudDriveFileSrv"]
+          def cls(x):return message_factory.GetMessageClass(x)
+          def rpc(n,q=None):
+              m=svc.methods_by_name[n];q=q or cls(m.input_type)()
+              data=q.SerializeToString();c=http.client.HTTPSConnection("cd.evren.cn",443,timeout=40,context=ssl.create_default_context())
+              try:
+                  c.request("POST","/clouddrive.CloudDriveFileSrv/"+n,b"\0"+struct.pack(">I",len(data))+data,{"content-type":"application/grpc-web+proto","x-grpc-web":"1","authorization":"Bearer "+token,"origin":"https://cd.evren.cn"})
+                  r=c.getresponse();code=r.status;heads={k.lower():v for k,v in r.getheaders()};raw=r.read(16000001)
+              finally:c.close()
+              if len(raw)>16000000:raise RuntimeError("oversized")
+              result=[];tr={};pos=0
+              while pos<len(raw):
+                  if pos+5>len(raw):raise RuntimeError("short frame")
+                  fl=raw[pos];size=int.from_bytes(raw[pos+1:pos+5],"big");pos+=5
+                  if pos+size>len(raw):raise RuntimeError("bad frame")
+                  d=raw[pos:pos+size];pos+=size
+                  if fl&0x80:
+                      for line in d.decode(errors="replace").splitlines():
+                          if ":" in line:
+                              k,v=line.split(":",1);tr[k.lower().strip()]=v.strip()
+                  else:
+                      if fl&1:raise RuntimeError("compressed response unexpected")
+                      obj=cls(m.output_type)();obj.ParseFromString(d);result.append(obj)
+              s=tr.get("grpc-status",heads.get("grpc-status"))
+              print("RPC",n,"HTTP",code,"grpc",s,flush=True)
+              if code!=200 or s!="0":raise RuntimeError("HTTP/grpc error")
+              return result
+          x=rpc("BackupGetAll")
+          bs=list(x[0].backups)
+          print("FINAL_BACKUP_COUNT",len(bs))
+          for j,b in enumerate(bs,1):
+              print("BACKUP",j,"open_issues",int(b.openSyncIssues),"historical_errors",len(b.errors),"state",b.DESCRIPTOR.fields_by_name["status"].enum_type.values_by_number[b.status].name)
+              if b.openSyncIssues:
+                  q=cls(svc.methods_by_name["BackupGetSyncIssues"].input_type)();q.value=b.backup.sourcePath
+                  issues=[item for m in rpc("BackupGetSyncIssues",q) for item in m.issues]
+                  counts={}
+                  for i in issues:
+                      fn=i.DESCRIPTOR.fields_by_name["kind"];kind=fn.enum_type.values_by_number[i.kind].name
+                      counts[kind]=counts.get(kind,0)+1
+                  print("OPEN_ISSUE_KINDS",j,json.dumps(counts))
+          PY
+          PYTHONPATH=/tmp/cd-once python3 /tmp/cd-once/post.py
