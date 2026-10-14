@@ -40,7 +40,7 @@ jobs:
            b=req.SerializeToString();c=http.client.HTTPSConnection("cd.evren.cn",443,timeout=45,context=ssl.create_default_context())
            try:
             c.request("POST","/clouddrive.CloudDriveFileSrv/"+name,b"\0"+struct.pack(">I",len(b))+b,{"content-type":"application/grpc-web+proto","x-grpc-web":"1","authorization":"Bearer "+TOKEN,"origin":"https://cd.evren.cn"})
-            r=c.getresponse();http=r.status;heads={k.lower():v for k,v in r.getheaders()};raw=r.read(16000001)
+            r=c.getresponse();http_code=r.status;heads={k.lower():v for k,v in r.getheaders()};raw=r.read(16000001)
            finally:c.close()
            if len(raw)>16000000:raise RuntimeError("Response too large")
            pos=0;tr={};out=[]
@@ -57,8 +57,8 @@ jobs:
              if flag&1:raise RuntimeError("Compressed gRPC frame not supported")
              x=cls(m.output_type)();x.ParseFromString(data);out.append(x)
            status=tr.get("grpc-status",heads.get("grpc-status"))
-           print("RPC",name,"HTTP",http,"grpc",status,flush=True)
-           if http!=200 or status!="0":raise RuntimeError(f"{name} failed HTTP={http} gRPC={status}")
+           print("RPC",name,"HTTP",http_code,"grpc",status,flush=True)
+           if http_code!=200 or status!="0":raise RuntimeError(f"{name} failed HTTP={http_code} gRPC={status}")
            return out
           print("RESOLVE_ENUM",[(x.name,x.number) for x in svc.methods_by_name["BackupResolveSyncIssue"].input_type.fields_by_name["action"].enum_type.values],flush=True)
           print("SYNC_ISSUE_SCHEMA",[(f.name,f.type,f.is_repeated) for f in svc.methods_by_name["BackupGetSyncIssues"].output_type.fields_by_name["issues"].message_type.fields],flush=True)
