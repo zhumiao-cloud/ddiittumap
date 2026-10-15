@@ -84,3 +84,5 @@ jobs:
           print("READ_ONLY_DONE")
           PY
           PYTHONPATH=/tmp/cd-audit python3 /tmp/cd-audit/check.py
+
+# One-time independent read-only post-dismiss recheck, 2026-10-15.
