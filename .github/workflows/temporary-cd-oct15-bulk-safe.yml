@@ -69,6 +69,18 @@ jobs:
           def ev(msg,name):
               f=msg.DESCRIPTOR.fields_by_name[name]
               return f.enum_type.values_by_number[int(getattr(msg,name))].name
+          # Retry only malformed/transient transport frames; never retry authentication errors.
+          import time
+          original_req=req
+          def req(method,r=None):
+              for attempt in range(4):
+                  try:
+                      return original_req(method,r)
+                  except RuntimeError as exc:
+                      if not any(x in str(exc) for x in ("truncated payload","truncated frame")) or attempt==3:
+                          raise
+                      print("TRANSPORT_RETRY",method,attempt+1,flush=True)
+                      time.sleep(2*(attempt+1))
           # User explicitly requests dismissing ALL currently visible synchronization notices.
           # Dismiss means acknowledgement only: never overwrite, adopt, delete or restore files.
           resolution=svc.methods_by_name["BackupResolveSyncIssue"].input_type
