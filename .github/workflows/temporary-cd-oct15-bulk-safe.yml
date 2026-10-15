@@ -1,4 +1,4 @@
-name: Temporary CloudDrive Oct15 safe bulk notice acknowledgement
+name: Temporary CloudDrive all sync notices acknowledgment
 # incremental second pass after live scan repopulated issues
 on:
   push:
@@ -9,7 +9,7 @@ jobs:
   audit:
     if: github.repository == 'zhumiao-cloud/ddiittumap' && github.actor == 'zhumiao-cloud' && github.event_name == 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Acknowledge sync notifications only without touching files
         shell: bash
@@ -69,75 +69,75 @@ jobs:
           def ev(msg,name):
               f=msg.DESCRIPTOR.fields_by_name[name]
               return f.enum_type.values_by_number[int(getattr(msg,name))].name
-          # This run only acknowledges already preserved conflict copies and expected
-          # non-mirrored deletion notices; it never alters content or sync policy.
-          action_desc=svc.methods_by_name["BackupResolveSyncIssue"].input_type
-          action=action_desc.fields_by_name["action"].enum_type.values_by_name["Dismiss"].number
-          assert action==0
-          initial=req("BackupGetAll")[0].backups
-          assert len(initial)==7,"Backup inventory changed; abort"
-          sources=[b.backup.sourcePath for b in initial]
-          assert len(set(sources))==len(sources)
-          print("INITIAL_COUNTS",json.dumps([int(x.openSyncIssues) for x in initial]),flush=True)
-          print("SAFETY_RULE","Dismiss-only, saved conflict copy or nonmirrored Keep deletion; no held guard",flush=True)
+          # User explicitly requests dismissing ALL currently visible synchronization notices.
+          # Dismiss means acknowledgement only: never overwrite, adopt, delete or restore files.
+          resolution=svc.methods_by_name["BackupResolveSyncIssue"].input_type
+          dismiss=resolution.fields_by_name["action"].enum_type.values_by_name["Dismiss"].number
+          assert dismiss==0
+          def status():
+              result=req("BackupGetAll")
+              if len(result)!=1:raise RuntimeError("Bad backup inventory response")
+              return list(result[0].backups)
+          def issues(path):
+              rq=cls(svc.methods_by_name["BackupGetSyncIssues"].input_type)(value=path)
+              return [x for z in req("BackupGetSyncIssues",rq) for x in z.issues if not x.resolved]
+          before=status()
+          print("BACKUP_COUNT",len(before),flush=True)
+          print("INITIAL_COUNTS",json.dumps([int(b.openSyncIssues) for b in before]),flush=True)
+          srcs=[b.backup.sourcePath for b in before]
+          if len(set(srcs))!=len(srcs):raise RuntimeError("Duplicate backup sources; stop")
           accepted=0
           rejected=0
-          by_kind=collections.Counter()
-          for i,(first,src) in enumerate(zip(initial,sources),1):
-              if not first.openSyncIssues: continue
-              if not (first.backup.isEnabled and ev(first.backup,"fileDeleteRule")=="Keep"
-                      and not first.backup.syncDeletionsTwoWay and not first.backup.twoWayHardDelete
-                      and not first.heldDeletionGuards):
-                  print("SKIPPED_PROTECTED",i,int(first.openSyncIssues),flush=True)
-                  continue
-              budget=int(first.openSyncIssues)
-              visited=set()
-              failed=set()
-              runs=0
-              while len(visited)+len(failed)<budget and runs<100:
-                  runs+=1
-                  state=req("BackupGetAll")[0].backups
-                  current=next((b for b in state if b.backup.sourcePath==src),None)
-                  if (current is None or not current.backup.isEnabled or current.heldDeletionGuards or
-                      ev(current.backup,"fileDeleteRule")!="Keep" or current.backup.syncDeletionsTwoWay or current.backup.twoWayHardDelete):
-                      print("STOP_POLICY_CHANGED",i,flush=True)
+          counts=collections.Counter()
+          per_backup={}
+          for index,src in enumerate(srcs,1):
+              finished=set()
+              errors=set()
+              empty_rechecks=0
+              iterations=0
+              max_ids=min(12000,max(1000,int(before[index-1].openSyncIssues)+2000))
+              while iterations<330 and len(finished)+len(errors)<max_ids:
+                  iterations+=1
+                  fresh=status()
+                  active=next((b for b in fresh if b.backup.sourcePath==src),None)
+                  if active is None:
+                      print("STOP_SOURCE_DISAPPEARED",index,flush=True)
                       break
-                  query=cls(svc.methods_by_name["BackupGetSyncIssues"].input_type)(value=src)
-                  notices=[v for response in req("BackupGetSyncIssues",query) for v in response.issues if not v.resolved]
-                  safe=[]
-                  for x in notices:
-                      if not x.id or x.id in visited or x.id in failed: continue
-                      kind=ev(x,"kind")
-                      delete_rule=ev(x,"deleteRule")
-                      if kind=="Conflict" and bool(x.conflictCopyPath) and bool(x.relativePath):
-                          safe.append((x.id,kind))
-                      elif kind=="DeletionsNotMirrored" and delete_rule=="Keep" and not x.affectedCount:
-                          safe.append((x.id,kind))
-                  if not safe: break
-                  block=safe[:min(40,budget-len(visited)-len(failed))]
-                  q=cls(action_desc)()
-                  q.sourcePath=src
-                  q.issueIds.extend([k for k,_ in block])
-                  q.action=action
-                  q.confirmed=False
-                  response=req("BackupResolveSyncIssue",q)
-                  ok=len(response)==1 and bool(response[0].success)
-                  if ok:
-                      visited.update(k for k,_ in block)
-                      accepted+=len(block)
-                      by_kind.update(kind for _,kind in block)
+                  if not active.openSyncIssues:
+                      empty_rechecks+=1
+                      if empty_rechecks>=2:break
+                      continue
+                  notices=issues(src)
+                  candidate=[x for x in notices if x.id and x.id not in finished and x.id not in errors]
+                  if not candidate:
+                      empty_rechecks+=1
+                      if empty_rechecks>=2:break
+                      continue
+                  empty_rechecks=0
+                  chunk=candidate[:min(50,max_ids-len(finished)-len(errors))]
+                  actionreq=cls(resolution)()
+                  actionreq.sourcePath=src
+                  actionreq.issueIds.extend([x.id for x in chunk])
+                  actionreq.action=dismiss
+                  actionreq.confirmed=False
+                  answer=req("BackupResolveSyncIssue",actionreq)
+                  success=len(answer)==1 and bool(answer[0].success)
+                  if success:
+                      accepted+=len(chunk)
+                      finished.update(x.id for x in chunk)
+                      counts.update(ev(x,"kind") for x in chunk)
                   else:
-                      failed.update(k for k,_ in block)
-                      rejected+=len(block)
-                  if runs%5==0 or not ok:
-                      print("PROGRESS",json.dumps({"backup":i,"round":runs,"accepted":len(visited),
-                          "rejected":len(failed),"server_open":int(current.openSyncIssues)}),flush=True)
-              print("BACKUP_PROCESSED",json.dumps({"backup":i,"accepted":len(visited),"rejected":len(failed),"rounds":runs}),flush=True)
-          ending=req("BackupGetAll")[0].backups
-          print("FINAL_COUNTS",json.dumps([int(x.openSyncIssues) for x in ending]),flush=True)
-          print("RESULT",json.dumps({"accepted":accepted,"rejected":rejected,"kinds":dict(by_kind),
-                                     "before":sum(x.openSyncIssues for x in initial),
-                                     "after":sum(x.openSyncIssues for x in ending)}),flush=True)
-          if rejected:raise RuntimeError("Some acknowledgements rejected")
+                      rejected+=len(chunk)
+                      errors.update(x.id for x in chunk)
+                  if iterations%10==0 or not success:
+                      print("PROGRESS",json.dumps({"index":index,"accepted":len(finished),"rejected":len(errors),"remaining_now":int(active.openSyncIssues)}),flush=True)
+              per_backup[index]={"accepted":len(finished),"rejected":len(errors),"iterations":iterations}
+              print("BACKUP_RESULT",json.dumps({"index":index,**per_backup[index]}),flush=True)
+          after=status()
+          print("FINAL_COUNTS",json.dumps([int(b.openSyncIssues) for b in after]),flush=True)
+          print("FINAL_KINDS",json.dumps(dict(counts)),flush=True)
+          print("SUMMARY",json.dumps({"accepted":accepted,"rejected":rejected,"before":sum(int(b.openSyncIssues) for b in before),"after":sum(int(b.openSyncIssues) for b in after)}),flush=True)
+          if rejected or sum(b.openSyncIssues for b in after):
+              raise RuntimeError("Some sync issues remain; review final counts")
           PY
           PYTHONPATH=/tmp/cd-audit python3 /tmp/cd-audit/check.py
