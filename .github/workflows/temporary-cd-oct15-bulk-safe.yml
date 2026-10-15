@@ -141,3 +141,5 @@ jobs:
               raise RuntimeError("Some sync issues remain; review final counts")
           PY
           PYTHONPATH=/tmp/cd-audit python3 /tmp/cd-audit/check.py
+
+# One-time follow-up for newly appeared NotComparable issue after independent audit.
